@@ -1,0 +1,63 @@
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.cache/
+.cache/**
+
+# Build products and native binaries
+build/
+dist/
+*.so
+*.o
+*.a
+
+# Model, dataset, and Hugging Face caches
+huggingface/
+cached_models/
+models--*/
+checkpoints/
+checkpoint/
+datasets/
+dataset/
+data/cache/
+*.pt
+
+# Experiment artifacts
+wandb/
+runs/
+logs/
+outputs/
+pred/
+pred_e/
+passkey_results/
+memory_results/
+speed_logs/
+output_samples/
+out_*
+*.log
+*.partial
+*.tmp
+core
+core.*
+
+# Local tools and credentials
+.DS_Store
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+
+# Repository-local auxiliary content retained from the upstream ignore file
+notebook/
+third_party/
+*.pdf
