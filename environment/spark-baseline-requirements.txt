@@ -1,0 +1,20 @@
+# Confirmed-necessary version pins for reproducing the KIVI FP16 LongBench
+# baseline on DGX Spark (aarch64, GB10 Blackwell, CUDA 13.0 driver).
+#
+# This is not a full `pip freeze` dump. Each pin below was individually
+# confirmed necessary; see environment/README.md ("DGX Spark Environment"
+# section) for the failure each one fixes. Do not add packages here unless
+# their exact version was likewise confirmed necessary.
+#
+# torch and flash-attn are not on PyPI for aarch64+CUDA13 in the form KIVI's
+# pyproject.toml requests, so they are installed from a separate index /
+# direct wheel URL rather than a plain `pip install` line:
+#
+#   python -m pip install torch==2.9.1 --index-url https://download.pytorch.org/whl/cu130
+#   python -m pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3+cu13torch2.9cxx11abiTRUE-cp312-cp312-linux_aarch64.whl"
+#
+# torch==2.4.1 (pyproject.toml's pin) has no aarch64 CUDA wheel at all and
+# cannot be used on this host.
+
+transformers==4.43.4
+datasets==3.6.0

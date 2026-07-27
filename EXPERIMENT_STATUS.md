@@ -68,6 +68,38 @@ Expected prediction path:
 
 `pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128/`
 
+**This baseline has not completed successfully yet.** Two environment
+compatibility issues were found and fixed on the DGX Spark host (aarch64,
+GB10, CUDA 13.0); see `environment/README.md` for full detail. Neither
+required changing KIVI model, quantization, or CUDA kernel code, and neither
+changed the LongBench task list or evaluation logic:
+
+- `FAILED_CONFIG_COMPATIBILITY`: `transformers==4.43.1` (the `pyproject.toml`
+  pin) raises `KeyError: 'rope_type'` when parsing
+  `lmsys/longchat-7b-v1.5-32k`'s config, before any model weights are
+  downloaded or any LongBench task starts. Cause: the model's `rope_scaling`
+  uses the legacy `{"type": "linear", ...}` key, and 4.43.1's
+  `rope_config_validation()` has a bug where the type-specific validator does
+  a hard `rope_scaling["rope_type"]` lookup despite the outer function
+  resolving `rope_type` via backward-compat. Fixed by pinning
+  `transformers==4.43.4` instead (the version already documented above as
+  the one actually validated for the completed KIVI-2 run). Not a memory or
+  CUDA issue.
+- `FAILED_DATASET_COMPATIBILITY`: with the RoPE issue fixed, the FP16 run
+  progressed past config parsing, model download, and FP16 model loading,
+  then failed loading the LongBench dataset itself:
+  `RuntimeError: Dataset scripts are no longer supported, but found
+  LongBench.py`. Cause: `datasets==5.0.0` (the default pip resolution)
+  dropped support for Hub datasets that ship a legacy loading script, and
+  `THUDM/LongBench` still ships `LongBench.py` as one. Fixed by pinning
+  `datasets==3.6.0`. Verified with a dataset-only smoke test (no GPU, no
+  model weights): `THUDM/LongBench` config `qasper`, split `test`, resolved
+  revision `5e628be450b7e67fb7ae6e201bd6d8f7056f7672`, 200 rows, all required
+  columns present.
+
+The FP16 baseline run has not yet been relaunched end-to-end with both fixes
+in place.
+
 ## Reproduction Command
 
 The following FP16 commands are planned and have not been executed:
