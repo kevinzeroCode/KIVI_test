@@ -18,3 +18,12 @@
 
 transformers==4.43.4
 datasets==3.6.0
+
+# eval_long_bench.py's metrics.py imports these for scoring; they were never
+# installed by the pyproject.toml-based install (only listed in the older
+# requirements.txt). Pinned to the requirements.txt versions since those are
+# the only versions verified against this metrics.py. Do not substitute
+# rouge-score for rouge; metrics.py imports `from rouge import Rouge`.
+jieba==0.42.1
+fuzzywuzzy==0.18.0
+rouge==1.0.1
