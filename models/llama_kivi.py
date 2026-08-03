@@ -152,6 +152,12 @@ class LlamaAttention_KIVI(nn.Module):
         self.is_causal = True
         self.k_bits = config.k_bits
         self.v_bits = config.v_bits
+        assert self.k_bits in (2, 4, 16), f"Unsupported k_bits={self.k_bits}; allowed values are 2, 4, 16"
+        assert self.v_bits in (2, 4, 16), f"Unsupported v_bits={self.v_bits}; allowed values are 2, 4, 16"
+        # quantize_key/quantize_value False means that side keeps a full-precision
+        # (unpacked) cache and never calls the quant/pack or cuda_bmm_fA_qB_outer paths.
+        self.quantize_key = self.k_bits < 16
+        self.quantize_value = self.v_bits < 16
         self.group_size = config.group_size
         self.residual_length = config.residual_length
         self.key_quant_chunk_size = getattr(config, "key_quant_chunk_size", 8192)
@@ -252,7 +258,7 @@ class LlamaAttention_KIVI(nn.Module):
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
 
-            if key_states_full.shape[-2] == self.residual_length:
+            if self.quantize_key and key_states_full.shape[-2] == self.residual_length:
                 assert self.residual_length % self.group_size == 0
                 key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), 
                                                                                                                             self.group_size, 
@@ -295,7 +301,7 @@ class LlamaAttention_KIVI(nn.Module):
                                                 value_scale, value_mn, self.v_bits)
                 attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], value_states_full)
             
-            if value_full_length > self.residual_length:
+            if self.quantize_value and value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
                 value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), 
                                                                                                 self.group_size, 
@@ -314,28 +320,43 @@ class LlamaAttention_KIVI(nn.Module):
             attn_weights = torch.matmul(query_states, 
                                         key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
             # quantize
-            if key_states.shape[-2] % self.residual_length != 0:
-                if key_states.shape[-2] < self.residual_length:
-                    key_states_quant = None
-                    key_states_full = key_states
-                else:
-                    key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :]
-                    key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
-            else:
-                key_states_quant = key_states
-                key_states_full = None
-            if key_states_quant is not None:
-                key_states_quant_trans, key_scale_trans, key_mn_trans = _chunked_key_quantize_and_pack_along_last_dim(
-                    key_states_quant.transpose(2, 3), self.group_size, self.k_bits, self.key_quant_chunk_size
-                )
-                del key_states_quant
-            else:
+            if not self.quantize_key:
+                # 16-bit pass-through: keep the whole prefill key cache in full
+                # precision, never pack/quantize it.
                 key_states_quant_trans = None
                 key_scale_trans = None
                 key_mn_trans = None
+                key_states_full = key_states
+            else:
+                if key_states.shape[-2] % self.residual_length != 0:
+                    if key_states.shape[-2] < self.residual_length:
+                        key_states_quant = None
+                        key_states_full = key_states
+                    else:
+                        key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :]
+                        key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
+                else:
+                    key_states_quant = key_states
+                    key_states_full = None
+                if key_states_quant is not None:
+                    key_states_quant_trans, key_scale_trans, key_mn_trans = _chunked_key_quantize_and_pack_along_last_dim(
+                        key_states_quant.transpose(2, 3), self.group_size, self.k_bits, self.key_quant_chunk_size
+                    )
+                    del key_states_quant
+                else:
+                    key_states_quant_trans = None
+                    key_scale_trans = None
+                    key_mn_trans = None
             del key_states
             
-            if value_states.shape[-2] <= self.residual_length:
+            if not self.quantize_value:
+                # 16-bit pass-through: keep the whole prefill value cache in full
+                # precision, never pack/quantize it.
+                value_states_quant = None
+                value_states_full = value_states
+                value_scale = None
+                value_mn = None
+            elif value_states.shape[-2] <= self.residual_length:
                 value_states_quant = None
                 value_states_full = value_states
                 value_scale = None
@@ -470,7 +491,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             else:
                 attn_weights = att_qkfull / math.sqrt(self.head_dim)
 
-            if key_states_full.shape[-2] == self.residual_length:
+            if self.quantize_key and key_states_full.shape[-2] == self.residual_length:
                 assert self.residual_length % self.group_size == 0
                 key_states_quant_trans_new, key_scale_trans_new, key_mn_trans_new = triton_quantize_and_pack_along_last_dim(key_states_full.transpose(2, 3).contiguous(), 
                                                                                                                             self.group_size, 
@@ -513,7 +534,7 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                                                 value_scale, value_mn, self.v_bits)
                 attn_output += torch.matmul(attn_weights[:, :, :, -value_full_length:], repeat_kv(value_states_full, self.num_key_value_groups))
             attn_output = attn_output.transpose(1, 2).contiguous()
-            if value_full_length > self.residual_length:
+            if self.quantize_value and value_full_length > self.residual_length:
                 assert value_full_length == self.residual_length + 1
                 value_states_quant_new, scale, mn = triton_quantize_and_pack_along_last_dim(value_states_full[:, :, :1, :].contiguous(), 
                                                                                                 self.group_size, 
@@ -553,28 +574,43 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
             )
             del query_states
             # quantize
-            if key_states.shape[-2] % self.residual_length != 0:
-                if key_states.shape[-2] < self.residual_length:
-                    key_states_quant = None
-                    key_states_full = key_states
-                else:
-                    key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :]
-                    key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
-            else:
-                key_states_quant = key_states
-                key_states_full = None
-            if key_states_quant is not None:
-                key_states_quant_trans, key_scale_trans, key_mn_trans = _chunked_key_quantize_and_pack_along_last_dim(
-                    key_states_quant.transpose(2, 3), self.group_size, self.k_bits, self.key_quant_chunk_size
-                )
-                del key_states_quant
-            else:
+            if not self.quantize_key:
+                # 16-bit pass-through: keep the whole prefill key cache in full
+                # precision, never pack/quantize it.
                 key_states_quant_trans = None
                 key_scale_trans = None
                 key_mn_trans = None
+                key_states_full = key_states
+            else:
+                if key_states.shape[-2] % self.residual_length != 0:
+                    if key_states.shape[-2] < self.residual_length:
+                        key_states_quant = None
+                        key_states_full = key_states
+                    else:
+                        key_states_quant = key_states[:, :, :-(key_states.shape[-2] % self.residual_length), :]
+                        key_states_full = key_states[:, :, -(key_states.shape[-2] % self.residual_length):, :].contiguous()
+                else:
+                    key_states_quant = key_states
+                    key_states_full = None
+                if key_states_quant is not None:
+                    key_states_quant_trans, key_scale_trans, key_mn_trans = _chunked_key_quantize_and_pack_along_last_dim(
+                        key_states_quant.transpose(2, 3), self.group_size, self.k_bits, self.key_quant_chunk_size
+                    )
+                    del key_states_quant
+                else:
+                    key_states_quant_trans = None
+                    key_scale_trans = None
+                    key_mn_trans = None
             del key_states
             
-            if value_states.shape[-2] <= self.residual_length:
+            if not self.quantize_value:
+                # 16-bit pass-through: keep the whole prefill value cache in full
+                # precision, never pack/quantize it.
+                value_states_quant = None
+                value_states_full = value_states
+                value_scale = None
+                value_mn = None
+            elif value_states.shape[-2] <= self.residual_length:
                 value_states_quant = None
                 value_states_full = value_states
                 value_scale = None
