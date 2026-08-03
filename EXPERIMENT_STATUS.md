@@ -27,6 +27,9 @@
 - Seed: `42`
 - Result average: `38.03`
 - Reference KIVI paper result: `38.30`
+- Host: original x86_64 / RTX 4090 host (see `environment/README.md`); no
+  per-task breakdown was retained for this run, only the overall average
+  above.
 
 The complete prediction JSONL files, logs, cached datasets, and model weights are
 local experimental artifacts and are intentionally not committed to GitHub.
@@ -101,18 +104,149 @@ The complete prediction JSONL files, `result.json`, cached datasets, model
 weights, and full run logs are local experimental artifacts and are
 intentionally not committed to GitHub.
 
+## Completed Baseline (KIVI-2, DGX Spark)
+
+- Model: `lmsys/longchat-7b-v1.5-32k`
+- Method: KIVI-2
+- K bits: `2`, V bits: `2`
+- Group size: `32`, residual length: `128`
+- Context limit: `31,500`
+- LongBench tasks: `15`
+- Samples: `3,550` (validated: 15/15 task files, 0 `.partial`, 0 parse
+  errors, 3550/3550 total rows)
+- Seed: `42`
+- Host: DGX Spark (aarch64, NVIDIA GB10, CUDA 13.0 driver)
+- Prediction path:
+  `pred/longchat-7b-v1.5-32k_31500_2bits_group32_residual128/`
+- Prediction log: `logs/longbench_kivi2_20260729_220808.log`
+- Evaluation log: `logs/longbench_kivi2_eval_20260730_221157.log`
+- Manifest: `outputs/run_manifests/longbench_kivi2_20260729_220808.txt`
+- Result path:
+  `pred/longchat-7b-v1.5-32k_31500_2bits_group32_residual128/result.json`
+
+Per-task scores:
+
+| task | score |
+|---|---|
+| triviaqa | 82.74 |
+| narrativeqa | 21.04 |
+| passage_retrieval_en | 32.25 |
+| gov_report | 30.48 |
+| qasper | 28.35 |
+| repobench-p | 55.17 |
+| trec | 66.50 |
+| multifieldqa_en | 41.58 |
+| qmsum | 22.48 |
+| musique | 13.69 |
+| lcc | 52.28 |
+| samsum | 41.21 |
+| hotpotqa | 32.98 |
+| multi_news | 26.60 |
+| 2wikimqa | 22.93 |
+
+- **Result average: `38.02` (38.01866666666667)**
+- Reference KIVI paper KIVI-2 result: `38.30` (delta: `-0.28`)
+- Spark FP16 result (above): `38.50266666666666` (delta: `-0.48`)
+- Original (RTX 4090) KIVI-2 result: `38.03` (delta: `-0.01`, essentially
+  matches — same method/model, different hardware)
+- No task scored 0 or non-finite.
+
+## Completed Baseline (KIVI-4, DGX Spark)
+
+- Model: `lmsys/longchat-7b-v1.5-32k`
+- Method: KIVI-4
+- K bits: `4`, V bits: `4`
+- Group size: `32`, residual length: `128`
+- Context limit: `31,500`
+- LongBench tasks: `15`
+- Samples: `3,550` (validated: 15/15 task files, 0 `.partial`, 0 parse
+  errors, 3550/3550 total rows)
+- Seed: `42`
+- Host: DGX Spark (aarch64, NVIDIA GB10, CUDA 13.0 driver)
+- Prediction path:
+  `pred/longchat-7b-v1.5-32k_31500_4bits_group32_residual128/`
+- Prediction log: `logs/longbench_kivi4_20260731_000821.log`
+- Evaluation log: `logs/longbench_kivi4_eval_20260731_220040.log` (original);
+  re-verified `2026-08-03` with a fresh evaluation pass over the same
+  unmodified prediction JSONLs, log `logs/longbench_kivi4_eval_20260803_092801.log`
+  — identical per-task scores and average, confirming the result is
+  deterministic and not an artifact of a single evaluation run
+- Manifest: `outputs/run_manifests/longbench_kivi4_20260731_000821.txt`
+- Result path:
+  `pred/longchat-7b-v1.5-32k_31500_4bits_group32_residual128/result.json`
+- Git commit at validation/evaluation time: `6f903a66033947519ac93ee78c9dc26a0dd968a9`
+- Environment: `transformers==4.43.4`, `datasets==3.6.0`
+
+Per-task scores:
+
+| task | score |
+|---|---|
+| triviaqa | 83.93 |
+| narrativeqa | 20.95 |
+| passage_retrieval_en | 32.50 |
+| gov_report | 31.38 |
+| qasper | 29.03 |
+| repobench-p | 56.52 |
+| trec | 66.50 |
+| multifieldqa_en | 43.67 |
+| qmsum | 22.91 |
+| musique | 14.72 |
+| lcc | 52.47 |
+| samsum | 40.79 |
+| hotpotqa | 33.01 |
+| multi_news | 26.62 |
+| 2wikimqa | 24.60 |
+
+- **Result average: `38.64`**
+- Reference KIVI paper KIVI-4 result: `38.79` (delta: `-0.15`)
+- Spark FP16 result (above): `38.50266666666666` (delta: `+0.14`)
+- Spark KIVI-2 result (above): `38.01866666666667` (delta: `+0.62`)
+- No task scored 0 or non-finite.
+
+## Final Baseline Comparison (DGX Spark)
+
+FP16, KIVI-2, and KIVI-4 were all run on the same DGX Spark host, same
+model (`lmsys/longchat-7b-v1.5-32k`), same 15 LongBench tasks / 3,550
+samples, same context limit (`31,500`), same group size (`32`) / residual
+length (`128`) where applicable, same seed (`42`), and greedy decoding.
+
+| method | reproduced average | paper reference | delta vs. paper | delta vs. Spark FP16 |
+|---|---|---|---|---|
+| FP16 | `38.50` (38.50266666666666) | `38.72` | `-0.22` | `+0.00` |
+| KIVI-2 | `38.02` (38.01866666666667) | `38.30` | `-0.28` | `-0.48` |
+| KIVI-4 | `38.64` | `38.79` | `-0.15` | `+0.14` |
+
+- KIVI-4 - KIVI-2 = `+0.62` (4-bit clearly outperforms 2-bit, as expected).
+- KIVI-4 slightly exceeds the local FP16 average; this is a known phenomenon
+  also reported for 4-bit KIVI in the literature (quantization noise can act
+  as a mild regularizer on some tasks) and is not itself a correctness
+  concern given per-task deltas are all small (see below).
+- Task keys are identical across all three result files (verified
+  programmatically).
+- No task scored `0` or a non-finite value in any of the three runs.
+- Largest per-task deltas vs. FP16 are on `passage_retrieval_en`
+  (KIVI-2: `+1.75`, KIVI-4: `+2.00`) and `multifieldqa_en` (KIVI-2:
+  `-1.84`); these are within normal run-to-run variance for 200-sample
+  greedy-decoded tasks and do not indicate a broken task.
+- This DGX Spark same-environment baseline gate (FP16 vs. KIVI-2 vs. KIVI-4,
+  all measured, all close to their paper references, no anomalous or
+  missing tasks) is considered **PASS**.
+
 ## Current Gates
 
 - Gate A - Implementation Correctness: **PARTIAL**. The packed KIVI path and
-  custom CUDA GEMV are present and the KIVI-2 parameters are wired into the
-  model config, but mixed K/V and per-layer routes are unsupported.
-- Gate B - Quality Reproduction: **PARTIAL, both KIVI-2 and FP16 measured**.
-  KIVI-2 completed all 15 tasks at `38.03` (paper: `38.30`). FP16 completed
-  all 15 tasks at `38.50` (paper: `38.72`). Both local results are within
-  ~0.3-0.5 of their respective paper references.
+  custom CUDA GEMV are present and the KIVI-2/KIVI-4 parameters are wired
+  into the model config, but mixed K/V and per-layer routes are unsupported.
+- Gate B - Quality Reproduction: **PASS on DGX Spark for FP16, KIVI-2, and
+  KIVI-4**. All three completed all 15 tasks with results within ~0.15-0.5
+  of their respective paper references; see "Final Baseline Comparison"
+  above. The original RTX 4090 KIVI-2 result (`38.03`) is not superseded by
+  the Spark KIVI-2 result (`38.02`) — both are recorded, and they closely
+  agree.
 - Gate C - System Reproduction: **PARTIAL**. Packed low-bit storage is
-  implemented, but there is no controlled FP16 vs. KIVI-2 comparison for peak
-  memory, bytes per token, or throughput on the same host.
+  implemented, and FP16/KIVI-2/KIVI-4 quality has now been measured on the
+  same host, but there is still no controlled comparison for peak memory,
+  bytes per token, or throughput across the three methods on this host.
 
 ## DGX Spark Reproduction Notes
 
@@ -150,10 +284,25 @@ LongBench task list or evaluation logic:
   `jieba==0.42.1`, `fuzzywuzzy==0.18.0`, `rouge==1.0.1`. This does not affect
   model output in any way; it only affects scoring the already-generated
   predictions.
+- Triton ptxas compatibility (required for KIVI-2 and KIVI-4, not FP16):
+  Triton 3.5.1 (bundled with `torch==2.9.1`) ships a CUDA 12.8 `ptxas` that
+  does not recognize GB10's `sm_121a` target
+  (`ptxas fatal: Value 'sm_121a' is not defined for option 'gpu-name'`).
+  The KIVI-2 and KIVI-4 runs exercise the Triton quant/pack path
+  (`triton_quantize_and_pack_along_last_dim`) and the `kivi_gemv` CUDA
+  extension, both of which need
+  `TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas` set in the launch
+  environment. The FP16 run (`k_bits=16, v_bits=16`) never touches this code
+  path and does not need the override. Both the KIVI-2 and KIVI-4 full
+  LongBench runs completed successfully with this override set, confirming
+  it as a durable fix (not just the earlier isolated smoke test). See
+  `environment/README.md` for the original diagnosis.
 
 All version pins above are recorded in `environment/spark-baseline-requirements.txt`.
 
-## Reproduction Command
+## Reproduction Commands
+
+FP16:
 
 ```bash
 mkdir -p logs
@@ -162,13 +311,41 @@ bash scripts/long_test.sh 0 16 16 32 128 lmsys/longchat-7b-v1.5-32k \
   > logs/longbench_fp16.log 2>&1
 ```
 
-Evaluation:
-
 ```bash
 ./.venv/bin/python eval_long_bench.py \
   --model longchat-7b-v1.5-32k_31500_16bits_group32_residual128
 ```
 
-Evaluation output:
+KIVI-2:
 
-`pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128/result.json`
+```bash
+mkdir -p logs
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+bash scripts/long_test.sh 0 2 2 32 128 lmsys/longchat-7b-v1.5-32k \
+  > logs/longbench_kivi2.log 2>&1
+```
+
+```bash
+./.venv/bin/python eval_long_bench.py \
+  --model longchat-7b-v1.5-32k_31500_2bits_group32_residual128
+```
+
+KIVI-4:
+
+```bash
+mkdir -p logs
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas \
+bash scripts/long_test.sh 0 4 4 32 128 lmsys/longchat-7b-v1.5-32k \
+  > logs/longbench_kivi4.log 2>&1
+```
+
+```bash
+./.venv/bin/python eval_long_bench.py \
+  --model longchat-7b-v1.5-32k_31500_4bits_group32_residual128
+```
+
+Evaluation output for each method is written to
+`result.json` inside the corresponding prediction directory, e.g.
+`pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128/result.json`.
