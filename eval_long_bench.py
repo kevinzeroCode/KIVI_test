@@ -45,6 +45,14 @@ def parse_args(args=None):
     parser.add_argument('--e', action='store_true', help="Evaluate on LongBench-E")
     return parser.parse_args(args)
 
+
+# Mirrors pred_long_bench.py's KIVI_PRED_ROOT/KIVI_PRED_E_ROOT: lets smoke/
+# functional tests point evaluation at an isolated output root instead of
+# the real pred/ or pred_e/ directories used by the committed baselines.
+# Defaults preserve the original hardcoded "pred/"/"pred_e/" behavior.
+PRED_ROOT = os.environ.get("KIVI_PRED_ROOT", "pred")
+PRED_E_ROOT = os.environ.get("KIVI_PRED_E_ROOT", "pred_e")
+
 def scorer_e(dataset, predictions, answers, lengths, all_classes):
     scores = {"0-4k": [], "4-8k": [], "8k+": []}
     for (prediction, ground_truths, length) in zip(predictions, answers, lengths):
@@ -78,9 +86,9 @@ if __name__ == '__main__':
     args = parse_args()
     scores = dict()
     if args.e:
-        path = f"pred_e/{args.model}/"
+        path = f"{PRED_E_ROOT}/{args.model}/"
     else:
-        path = f"pred/{args.model}/"
+        path = f"{PRED_ROOT}/{args.model}/"
     all_files = os.listdir(path)
     print("Evaluating on:", all_files)
     for filename in all_files:
@@ -102,8 +110,8 @@ if __name__ == '__main__':
             score = scorer(dataset, predictions, answers, all_classes)
         scores[dataset] = score
     if args.e:
-        out_path = f"pred_e/{args.model}/result.json"
+        out_path = f"{PRED_E_ROOT}/{args.model}/result.json"
     else:
-        out_path = f"pred/{args.model}/result.json"
+        out_path = f"{PRED_ROOT}/{args.model}/result.json"
     with open(out_path, "w") as f:
         json.dump(scores, f, ensure_ascii=False, indent=4)
