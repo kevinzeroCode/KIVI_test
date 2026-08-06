@@ -41,10 +41,18 @@ local experimental artifacts and are intentionally not committed to GitHub.
 - The newest residual tokens remain in FP16 for this experiment.
 - Older key/value cache entries use packed low-bit integer storage.
 - Decode uses the custom CUDA GEMV extension (`kivi_gemv`).
-- A mixed K/V configuration currently falls back to standard Hugging Face
-  attention whenever either K or V is configured as 16-bit.
-- Prediction directory names include K bits but not V bits, so mixed K/V runs
-  with the same K-bit value are not currently isolated from one another.
+- Mixed K/V quantization is implemented (commit `8721f76e0f67841691c5384aeb3788fc7d9c521d`,
+  `feature/mixed-kv-ablation` merged to `main`): a side with `bits==16` is a
+  true FP16 pass-through (never quantized, packed, or run through the CUDA
+  GEMV kernel), while the other side keeps the original packed low-bit path.
+  `K2/V4`, `K4/V2`, `K2/V2`, `K4/V4`, and `K16/V16` all continue to work
+  unchanged. See `docs/mixed_kv_quantization.md` for the loader decision
+  table and full unit/kernel-route/numerical test results.
+- Prediction directory names are asymmetric-safe: symmetric configs
+  (`k_bits == v_bits`) keep the legacy `{model}_{len}_{bits}bits_group{g}_residual{r}`
+  naming; mixed configs use `{model}_{len}_k{k}_v{v}_group{g}_residual{r}`,
+  so `K2/V16` and `K16/V2` no longer collide with the `K2/V2`/`FP16`
+  baseline directories.
 - Per-layer route maps are not implemented.
 - Rotation-KIVI and Polar are not implemented.
 
@@ -203,6 +211,225 @@ Per-task scores:
 - Spark KIVI-2 result (above): `38.01866666666667` (delta: `+0.62`)
 - No task scored 0 or non-finite.
 
+## Completed Ablation (K2/V16 - Key-only KIVI-2, DGX Spark)
+
+- Model: `lmsys/longchat-7b-v1.5-32k`
+- Method: Key-only KIVI-2 (mixed K/V quantization) — Key quantized to 2-bit,
+  Value kept as an FP16 pass-through (never quantized/packed/GEMV'd)
+- K bits: `2`, V bits: `16`
+- Group size: `32`, residual length: `128`
+- Context limit: `31,500`
+- LongBench tasks: `15`
+- Samples: `3,550` (validated: 15/15 task files, 0 `.partial`, 0 parse
+  errors, 3550/3550 total rows)
+- Seed: `42`
+- Host: DGX Spark (aarch64, NVIDIA GB10, CUDA 13.0 driver)
+- Git commit at launch: `8721f76e0f67841691c5384aeb3788fc7d9c521d`
+- Prediction path:
+  `pred/longchat-7b-v1.5-32k_31500_k2_v16_group32_residual128/`
+- Prediction log: `logs/longbench_k2_v16_20260803_113403.log`
+- Evaluation log: `logs/longbench_k2_v16_eval_20260804_181529.log`
+- Manifest: `outputs/run_manifests/longbench_k2_v16_20260803_113403.txt`
+- Result path:
+  `pred/longchat-7b-v1.5-32k_31500_k2_v16_group32_residual128/result.json`
+
+Per-task scores:
+
+| task | score |
+|---|---|
+| triviaqa | 83.14 |
+| narrativeqa | 20.12 |
+| passage_retrieval_en | 36.50 |
+| gov_report | 31.44 |
+| qasper | 29.67 |
+| repobench-p | 55.48 |
+| trec | 67.00 |
+| multifieldqa_en | 41.86 |
+| qmsum | 22.53 |
+| musique | 13.87 |
+| lcc | 54.30 |
+| samsum | 40.79 |
+| hotpotqa | 32.74 |
+| multi_news | 26.75 |
+| 2wikimqa | 22.65 |
+
+- **Result average: `38.5893` (38.589333333333336)**
+- Spark FP16 result (above): `38.50266666666666` (delta: `+0.09`)
+- No task scored 0 or non-finite. This run completed and was launched/health-
+  checked with no interruption.
+
+## Completed Ablation (K16/V2 - Value-only KIVI-2, DGX Spark)
+
+- Model: `lmsys/longchat-7b-v1.5-32k`
+- Method: Value-only KIVI-2 (mixed K/V quantization) — Key kept as an FP16
+  pass-through, Value quantized to 2-bit
+- K bits: `16`, V bits: `2`
+- Group size: `32`, residual length: `128`
+- Context limit: `31,500`
+- LongBench tasks: `15`
+- Samples: `3,550` (validated: 15/15 task files, 0 `.partial`, 0 parse
+  errors, 3550/3550 total rows)
+- Seed: `42`
+- Host: DGX Spark (aarch64, NVIDIA GB10, CUDA 13.0 driver)
+- Git commit at launch: `8721f76e0f67841691c5384aeb3788fc7d9c521d`
+- Prediction path:
+  `pred/longchat-7b-v1.5-32k_31500_k16_v2_group32_residual128/`
+- Original (interrupted) prediction log:
+  `logs/longbench_k16_v2_20260804_181640.log`
+- Resume prediction log:
+  `logs/longbench_k16_v2_resume_20260806_210613.log`
+- Evaluation log: `logs/longbench_k16_v2_eval_20260807_001157.log`
+- Manifests:
+  `outputs/run_manifests/longbench_k16_v2_20260804_181640.txt`,
+  `outputs/run_manifests/longbench_k16_v2_resume_20260806_210613.txt`
+- Result path:
+  `pred/longchat-7b-v1.5-32k_31500_k16_v2_group32_residual128/result.json`
+
+**Interruption and safe resume.** The original launch (`2026-08-04 18:16`)
+progressed cleanly through 11 of 15 tasks and 10/200 rows into `triviaqa`,
+then stopped writing to its log at `2026-08-05 06:50` with no further
+activity. A read-only root-cause investigation (no prediction re-run, no
+file changes) found:
+
+- Root cause classification: **`UNKNOWN_ABRUPT_TERMINATION`** — the process
+  and the system's own `journald` logging stopped within the same ~50-minute
+  window (`~06:00`-`~06:50` on `2026-08-05`), with no clean shutdown target,
+  no OOM message, no CUDA/Python traceback, and no "Killed"/"Terminated"
+  text anywhere in the 174 KB log. The actual host reboot did not occur
+  until `2026-08-06 05:50`, roughly 23 hours later — consistent with a
+  silent whole-system freeze/hang followed by a much later manual/watchdog
+  power-cycle, rather than a clean reboot or a single killed process.
+  Kernel-level evidence that could confirm or rule out a GPU driver/Xid
+  event or an OOM-killer action (`dmesg`, `journalctl -k`) was not
+  accessible without `sudo`, which was intentionally not used; this remains
+  an open, unresolved gap in the evidence.
+- All 11 completed task JSONLs and the `triviaqa.jsonl.partial` (10 valid
+  rows) were verified byte-for-byte parseable with 0 errors, and
+  `run_config.json` matched the run being resumed.
+- Resume used the identical launch command/config (no code, package, or
+  config changes). `pred_long_bench.py`'s existing resume logic (`skip` for
+  complete `.jsonl`, `resume ... from ... .partial` with `start_idx=done`
+  for the partial, atomic `os.replace` to the final name only once a task
+  reaches its expected row count) correctly skipped all 11 complete tasks,
+  resumed `triviaqa` from row 10 (not row 0), and then ran `samsum`, `trec`,
+  and `passage_retrieval_en` from scratch. The resumed run completed all
+  remaining work and exited cleanly with no errors.
+
+Final state: **15/15 tasks, 3,550/3,550 rows, 0 `.partial` files, 0 parse
+errors.**
+
+Per-task scores:
+
+| task | score |
+|---|---|
+| triviaqa | 84.15 |
+| narrativeqa | 21.40 |
+| passage_retrieval_en | 31.50 |
+| gov_report | 31.40 |
+| qasper | 28.46 |
+| repobench-p | 55.99 |
+| trec | 66.50 |
+| multifieldqa_en | 43.95 |
+| qmsum | 22.55 |
+| musique | 14.54 |
+| lcc | 47.91 |
+| samsum | 41.28 |
+| hotpotqa | 33.45 |
+| multi_news | 26.30 |
+| 2wikimqa | 24.43 |
+
+- **Result average: `38.254` (38.254000000000005)**
+- Spark FP16 result (above): `38.50266666666666` (delta: `-0.25`)
+- No task scored 0 or non-finite.
+
+## Five-Way KV Cache Ablation Comparison (DGX Spark)
+
+FP16, K2/V16 (Key-only), K16/V2 (Value-only), K2/V2 (joint KIVI-2), and
+K4/V4 (KIVI-4) were all run on the same host (DGX Spark, aarch64, NVIDIA
+GB10, CUDA 13.0), same model (`lmsys/longchat-7b-v1.5-32k`), same 15
+LongBench tasks / 3,550 samples, same context limit (`31,500`), same group
+size (`32`) / residual length (`128`), same seed (`42`), and greedy
+decoding.
+
+| method | average | delta vs. FP16 |
+|---|---|---|
+| FP16 | `38.5027` | `+0.0000` |
+| K2/V16 (Key-only) | `38.5893` | `+0.0867` |
+| K16/V2 (Value-only) | `38.2540` | `-0.2487` |
+| K2/V2 (joint KIVI-2) | `38.0187` | `-0.4840` |
+| K4/V4 (KIVI-4) | `38.6400` | `+0.1373` |
+
+Ablation decomposition (loss = average − FP16 average):
+
+- Key-only loss (K2/V16 − FP16): `+0.0867` (no measurable degradation;
+  slightly above FP16, within run-to-run task-level variance)
+- Value-only loss (K16/V2 − FP16): `-0.2487`
+- Joint K2/V2 loss (K2/V2 − FP16): `-0.4840`
+- Interaction (joint − key-only − value-only): `-0.3220`
+- K2/V16 − K16/V2: `+0.3353`
+
+Per-task comparison:
+
+| task | FP16 | K2/V16 | K16/V2 | K2/V2 | K4/V4 |
+|---|---|---|---|---|---|
+| 2wikimqa | 24.45 | 22.65 | 24.43 | 22.93 | 24.60 |
+| gov_report | 30.81 | 31.44 | 31.40 | 30.48 | 31.38 |
+| hotpotqa | 33.05 | 32.74 | 33.45 | 32.98 | 33.01 |
+| lcc | 52.99 | 54.30 | 47.91 | 52.28 | 52.47 |
+| multi_news | 26.62 | 26.75 | 26.30 | 26.60 | 26.62 |
+| multifieldqa_en | 43.42 | 41.86 | 43.95 | 41.58 | 43.67 |
+| musique | 14.71 | 13.87 | 14.54 | 13.69 | 14.72 |
+| narrativeqa | 20.81 | 20.12 | 21.40 | 21.04 | 20.95 |
+| passage_retrieval_en | 30.50 | 36.50 | 31.50 | 32.25 | 32.50 |
+| qasper | 29.37 | 29.67 | 28.46 | 28.35 | 29.03 |
+| qmsum | 22.73 | 22.53 | 22.55 | 22.48 | 22.91 |
+| repobench-p | 56.79 | 55.48 | 55.99 | 55.17 | 56.52 |
+| samsum | 40.80 | 40.79 | 41.28 | 41.21 | 40.79 |
+| trec | 66.50 | 67.00 | 66.50 | 66.50 | 66.50 |
+| triviaqa | 83.99 | 83.14 | 84.15 | 82.74 | 83.93 |
+
+**Analysis:**
+
+1. On the 15-task average, **Value-only quantization (K16/V2) costs more
+   than Key-only (K2/V16)**: Key-only shows no measurable loss versus FP16
+   (`+0.09`), while Value-only loses `-0.25`.
+2. The joint K2/V2 loss (`-0.48`) is **not** close to the sum of the two
+   individual losses (`+0.09 + -0.25 = -0.16`); the actual joint
+   degradation is roughly 3x larger than that naive sum.
+3. The interaction term is **negative and non-trivial** (`-0.32`), meaning
+   quantizing both Key and Value together hurts noticeably more than the
+   two individual effects predict on their own (a super-additive/synergistic
+   degradation, not an independent/additive one).
+4. Tasks most sensitive to **Key** quantization (K2/V16 vs. FP16, biggest
+   drops): `2wikimqa` (`-1.80`), `multifieldqa_en` (`-1.56`), `repobench-p`
+   (`-1.31`), `musique` (`-0.84`), `triviaqa` (`-0.85`), `narrativeqa`
+   (`-0.69`). Multi-hop QA and long-context QA tasks appear more sensitive
+   to Key quantization than to Value quantization.
+5. Tasks most sensitive to **Value** quantization (K16/V2 vs. FP16, biggest
+   drops): `lcc` (`-5.08`, by far the largest single-task delta observed in
+   any of the five configurations), `qasper` (`-0.91`), `repobench-p`
+   (`-0.80`). Notably, the two code-completion tasks (`lcc`, `repobench-p`,
+   both scored with `code_sim_score`) are the most Value-sensitive tasks,
+   while `lcc` actually *improves* under Key-only quantization (`+1.31`) —
+   a striking asymmetry specific to code-completion-style tasks.
+6. The overall K2/V16 vs. K16/V2 average gap (`0.34` points) is **small
+   relative to individual per-task swings** seen in this same comparison
+   (`lcc`: `-5.08` under Value-only; `passage_retrieval_en`: `+6.00` under
+   Key-only). This means the aggregate 15-task average alone is not a
+   strong basis for a general "Key quantization is safer than Value
+   quantization" claim; the task-level pattern (code-completion tasks being
+   Value-sensitive; multi-hop/long-context QA being more Key-sensitive) is
+   the more informative and specific signal here.
+7. **These results are preliminary.** Each configuration was run once
+   (single seed, single pass) with no repeated trials, confidence
+   intervals, or significance testing; `passage_retrieval_en` (`+6.00`
+   under Key-only) and `lcc` (`-5.08` under Value-only) are large enough
+   single-task swings on 200-sample tasks that they should not be
+   over-interpreted as precise quantization-sensitivity measurements without
+   further repetition. The average-level comparisons (all five methods
+   within `~0.6` points of each other) and the interaction estimate should
+   be treated as directional evidence, not confirmed effect sizes.
+
 ## Final Baseline Comparison (DGX Spark)
 
 FP16, KIVI-2, and KIVI-4 were all run on the same DGX Spark host, same
@@ -234,15 +461,17 @@ length (`128`) where applicable, same seed (`42`), and greedy decoding.
 
 ## Current Gates
 
-- Gate A - Implementation Correctness: **PARTIAL**. The packed KIVI path and
-  custom CUDA GEMV are present and the KIVI-2/KIVI-4 parameters are wired
-  into the model config, but mixed K/V and per-layer routes are unsupported.
-- Gate B - Quality Reproduction: **PASS on DGX Spark for FP16, KIVI-2, and
-  KIVI-4**. All three completed all 15 tasks with results within ~0.15-0.5
-  of their respective paper references; see "Final Baseline Comparison"
-  above. The original RTX 4090 KIVI-2 result (`38.03`) is not superseded by
-  the Spark KIVI-2 result (`38.02`) — both are recorded, and they closely
-  agree.
+- Gate A - Implementation Correctness: **PARTIAL**. The packed KIVI path,
+  custom CUDA GEMV, and mixed K/V quantization (16-bit pass-through on
+  either side) are all present and covered by unit/kernel-route/numerical
+  tests; per-layer routes are still unsupported.
+- Gate B - Quality Reproduction: **PASS on DGX Spark for FP16, KIVI-2,
+  KIVI-4, K2/V16, and K16/V2**. All five completed all 15 tasks; FP16/
+  KIVI-2/KIVI-4 are within ~0.15-0.5 of their respective paper references
+  (see "Final Baseline Comparison"), and K2/V16/K16/V2 are within ~0.09-0.25
+  of the Spark FP16 average (see "Five-Way KV Cache Ablation Comparison").
+  The original RTX 4090 KIVI-2 result (`38.03`) is not superseded by the
+  Spark KIVI-2 result (`38.02`) — both are recorded, and they closely agree.
 - Gate C - System Reproduction: **PARTIAL**. Packed low-bit storage is
   implemented, and FP16/KIVI-2/KIVI-4 quality has now been measured on the
   same host, but there is still no controlled comparison for peak memory,
