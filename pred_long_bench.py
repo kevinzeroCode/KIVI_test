@@ -12,6 +12,7 @@ os.environ["WANDB_DISABLED"] = "true"
 
 import transformers
 from utils.process_args import process_args
+from utils.jsonl_integrity import inspect_jsonl
 from transformers import LlamaConfig, MistralConfig, AutoTokenizer
 
 
@@ -199,11 +200,46 @@ def prepare_run_directory(pred_dir, run_config):
     return "legacy_no_metadata"
 
 
-def count_jsonl(path):
-    if not os.path.exists(path):
-        return 0
-    with open(path, "r", encoding="utf-8") as f:
-        return sum(1 for line in f if line.strip())
+def resolve_dataset_resume_plan(dataset, out_path, partial_path, expected):
+    """Decide skip/resume/start for one LongBench task using strict JSONL
+    validation. Fails closed (RuntimeError) rather than ever silently
+    treating a corrupted line as a completed sample.
+
+    Returns (action, active_path, done) where action is "skip", "resume",
+    or "start".
+    """
+    if os.path.exists(out_path):
+        info = inspect_jsonl(out_path)
+        if info.invalid_rows:
+            raise RuntimeError(
+                f"{dataset}: final prediction file {out_path} contains "
+                f"{info.invalid_rows} invalid JSON row(s) (first at line "
+                f"{info.first_invalid_line}). Refusing to skip or resume a "
+                "corrupted completed file. Inspect it and, if the "
+                "corruption is a contiguous tail, repair with "
+                f"`python scripts/repair_partial_jsonl.py --path {out_path} "
+                "--dry-run` before continuing."
+            )
+        if info.valid_rows >= expected:
+            return "skip", out_path, info.valid_rows
+        return "resume", out_path, info.valid_rows
+
+    info = inspect_jsonl(partial_path)
+    if info.invalid_rows:
+        raise RuntimeError(
+            f"{dataset}: partial prediction file {partial_path} contains "
+            f"{info.invalid_rows} invalid JSON line(s) (first invalid line: "
+            f"{info.first_invalid_line}; valid prefix length: "
+            f"{info.valid_prefix_rows}). Resume start_idx cannot be safely "
+            "determined from a corrupted partial. Run `python "
+            f"scripts/repair_partial_jsonl.py --path {partial_path} "
+            "--dry-run` to inspect the corruption, then rerun with --apply "
+            "to repair contiguous tail corruption. This run will not "
+            "auto-skip, auto-truncate, or auto-repair the corrupted line."
+        )
+    if info.valid_rows:
+        return "resume", partial_path, info.valid_rows
+    return "start", partial_path, 0
 
 
 def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name, out_path, start_idx=0):
@@ -250,6 +286,15 @@ def get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset
             json.dump(row, f, ensure_ascii=False)
             f.write('\n')
             f.flush()
+            # Unattended multi-hour GPU runs on this host have twice hit an
+            # abrupt, unexplained termination (see EXPERIMENT_STATUS.md).
+            # fsync after each complete row makes each already-finished
+            # sample durable against a host crash/freeze immediately after
+            # it's written, at the cost of a small per-row I/O overhead.
+            # It does not protect against mid-write corruption of a row
+            # that hasn't reached this point yet, and it is not a
+            # substitute for the strict JSON validation in inspect_jsonl().
+            os.fsync(f.fileno())
             del input, output, tokenized_prompt, row
             gc.collect()
             if torch.cuda.is_available():
@@ -436,24 +481,18 @@ if __name__ == '__main__':
         out_path = os.path.join(pred_dir, f"{dataset}.jsonl")
         expected = len(data)
         partial_path = f"{out_path}.partial"
-        if os.path.exists(out_path):
-            done = count_jsonl(out_path)
-            if done >= expected:
-                print(f"skip {dataset}: {out_path} exists ({done}/{expected})")
-                continue
-            active_path = out_path
-            print(f"resume {dataset}: {done}/{expected} from {out_path}")
+        action, active_path, done = resolve_dataset_resume_plan(dataset, out_path, partial_path, expected)
+        if action == "skip":
+            print(f"skip {dataset}: {active_path} exists ({done}/{expected})")
+            continue
+        elif action == "resume":
+            print(f"resume {dataset}: {done}/{expected} from {active_path}")
         else:
-            active_path = partial_path
-            done = count_jsonl(partial_path)
-            if done:
-                print(f"resume {dataset}: {done}/{expected} from {partial_path}")
-            else:
-                print(f"start {dataset}: writing {partial_path}")
+            print(f"start {dataset}: writing {active_path}")
         if done > expected:
             raise ValueError(f"{active_path} has {done} rows, expected at most {expected}")
         prompt_format = dataset2prompt[dataset]
         max_gen = dataset2maxlen[dataset]
         get_pred(model, tokenizer, data, max_length, max_gen, prompt_format, dataset, device, model_name, active_path, done)
-        if active_path != out_path and count_jsonl(active_path) >= expected:
+        if active_path != out_path and inspect_jsonl(active_path).valid_rows >= expected:
             os.replace(active_path, out_path)
