@@ -1,0 +1,453 @@
+{
+  "timestamp": "2026-08-07T01:15:44.396320+08:00",
+  "git_commit": "6fd713fe03cb53d7c998f9564db78b2b8ead80f2",
+  "bootstrap_seed": 42,
+  "bootstrap_iterations": 10000,
+  "input_paths": {
+    "FP16": "pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128",
+    "K2/V16": "pred/longchat-7b-v1.5-32k_31500_k2_v16_group32_residual128",
+    "K16/V2": "pred/longchat-7b-v1.5-32k_31500_k16_v2_group32_residual128",
+    "K2/V2": "pred/longchat-7b-v1.5-32k_31500_2bits_group32_residual128",
+    "K4/V4": "pred/longchat-7b-v1.5-32k_31500_4bits_group32_residual128"
+  },
+  "metric_implementation": "eval_long_bench.dataset2metric + metrics.py (unmodified, imported)",
+  "pairing_validation": {
+    "status": "PASS",
+    "methods_compared": [
+      "FP16",
+      "K2/V16",
+      "K16/V2",
+      "K2/V2",
+      "K4/V4"
+    ],
+    "reference_method": "FP16",
+    "tasks_checked": [
+      "2wikimqa",
+      "gov_report",
+      "hotpotqa",
+      "lcc",
+      "multi_news",
+      "multifieldqa_en",
+      "musique",
+      "narrativeqa",
+      "passage_retrieval_en",
+      "qasper",
+      "qmsum",
+      "repobench-p",
+      "samsum",
+      "trec",
+      "triviaqa"
+    ],
+    "fields_checked": [
+      "answers",
+      "all_classes",
+      "length"
+    ],
+    "note": "因 prediction 不包含原始 sample ID，本分析以相同 task 內的 row order 配對，並以 answers、all_classes、length 的逐列一致性作為配對驗證。"
+  },
+  "recomputed_score_validation": {
+    "status": "PASS",
+    "n_checked": 75,
+    "n_mismatches": 0
+  },
+  "method_averages": {
+    "official_avg_from_result_json": {
+      "FP16": 38.50266666666666,
+      "K2/V16": 38.589333333333336,
+      "K16/V2": 38.254000000000005,
+      "K2/V2": 38.01866666666667,
+      "K4/V4": 38.64
+    },
+    "raw_avg_from_unrounded_sample_means": {
+      "FP16": 38.50338419255467,
+      "K2/V16": 38.58757275089216,
+      "K16/V2": 38.25353006586116,
+      "K2/V2": 38.0201064352779,
+      "K4/V4": 38.64018323960685
+    },
+    "note": "正式 LongBench 報告分數使用 result.json 內 15 個已 round task score 的平均（official_avg_from_result_json）。"
+  },
+  "overall_effects_primary_bootstrap": {
+    "key_only": {
+      "observed": 0.0841885583374828,
+      "bootstrap_mean": 0.08591664911117551,
+      "se": 0.2648488693382173,
+      "ci_low": -0.43210908352007105,
+      "ci_high": 0.6086159649318629,
+      "p_gt0": 0.626,
+      "p_lt0": 0.374,
+      "sign_probability": 0.748
+    },
+    "value_only": {
+      "observed": -0.249854126693509,
+      "bootstrap_mean": -0.2453322940372179,
+      "se": 0.13692529391410013,
+      "ci_low": -0.5101233895953774,
+      "ci_high": 0.02161467053380758,
+      "p_gt0": 0.0366,
+      "p_lt0": 0.9634,
+      "sign_probability": 0.0732
+    },
+    "joint": {
+      "observed": -0.48327775727676775,
+      "bootstrap_mean": -0.4808483270037902,
+      "se": 0.24715993862623803,
+      "ci_low": -0.9607551134325063,
+      "ci_high": 0.0020534542379539804,
+      "p_gt0": 0.0256,
+      "p_lt0": 0.9744,
+      "sign_probability": 0.0512
+    },
+    "kivi4": {
+      "observed": 0.13679904705217397,
+      "bootstrap_mean": 0.1378150817672848,
+      "se": 0.1280601798276777,
+      "ci_low": -0.11352171825292622,
+      "ci_high": 0.391899305337591,
+      "p_gt0": 0.8593,
+      "p_lt0": 0.1407,
+      "sign_probability": 0.2814
+    },
+    "key_minus_value": {
+      "observed": 0.3340426850309918,
+      "bootstrap_mean": 0.33124894314839337,
+      "se": 0.27060201514102733,
+      "ci_low": -0.2037883590567009,
+      "ci_high": 0.8563398835527313,
+      "p_gt0": 0.8918,
+      "p_lt0": 0.1082,
+      "sign_probability": 0.2164
+    },
+    "interaction": {
+      "observed": -0.3176121889207416,
+      "bootstrap_mean": -0.3214326820777479,
+      "se": 0.20929335594094117,
+      "ci_low": -0.7353758464515017,
+      "ci_high": 0.08640690380537071,
+      "p_gt0": 0.0631,
+      "p_lt0": 0.9369,
+      "sign_probability": 0.1262
+    }
+  },
+  "overall_effects_secondary_bootstrap": {
+    "key_only": {
+      "observed": 0.0841885583374828,
+      "bootstrap_mean": 0.08222433988941007,
+      "se": 0.46214222076688016,
+      "ci_low": -0.6768994732419285,
+      "ci_high": 1.1152306105912522,
+      "p_gt0": 0.5362,
+      "p_lt0": 0.4638,
+      "sign_probability": 0.9276
+    },
+    "value_only": {
+      "observed": -0.249854126693509,
+      "bootstrap_mean": -0.254080099638916,
+      "se": 0.3612245224321262,
+      "ci_low": -1.0596121459328935,
+      "ci_high": 0.29074002776526914,
+      "p_gt0": 0.2799,
+      "p_lt0": 0.7201,
+      "sign_probability": 0.5598
+    },
+    "joint": {
+      "observed": -0.48327775727676775,
+      "bootstrap_mean": -0.48480340299142866,
+      "se": 0.2325237798005216,
+      "ci_low": -0.9228791188890756,
+      "ci_high": -0.015050986161053404,
+      "p_gt0": 0.0205,
+      "p_lt0": 0.9795,
+      "sign_probability": 0.041
+    },
+    "kivi4": {
+      "observed": 0.13679904705217397,
+      "bootstrap_mean": 0.13667277176384296,
+      "se": 0.14314875568844052,
+      "ci_low": -0.09170257419469131,
+      "ci_high": 0.44813483599885007,
+      "p_gt0": 0.8229,
+      "p_lt0": 0.1771,
+      "sign_probability": 0.3542
+    },
+    "key_minus_value": {
+      "observed": 0.3340426850309918,
+      "bootstrap_mean": 0.3290126617969714,
+      "se": 0.5830278045485006,
+      "ci_low": -0.6912813361068983,
+      "ci_high": 1.5828080203589192,
+      "p_gt0": 0.6919,
+      "p_lt0": 0.3081,
+      "sign_probability": 0.6162
+    },
+    "interaction": {
+      "observed": -0.3176121889207416,
+      "bootstrap_mean": -0.311878982567374,
+      "se": 0.41437455097167786,
+      "ci_low": -1.2105392016874963,
+      "ci_high": 0.44024396218818124,
+      "p_gt0": 0.2273,
+      "p_lt0": 0.7727,
+      "sign_probability": 0.4546
+    }
+  },
+  "leave_one_task_out": {
+    "key_only": {
+      "full_15_task_mean": 0.0841885583374828,
+      "loto_values": {
+        "2wikimqa": 0.21905005825763188,
+        "gov_report": 0.04543817792028321,
+        "hotpotqa": 0.11284484956441936,
+        "lcc": -0.0030836874955541154,
+        "multi_news": 0.08107891803264332,
+        "multifieldqa_en": 0.20149502671821287,
+        "musique": 0.1502797098242996,
+        "narrativeqa": 0.139499322702578,
+        "passage_retrieval_en": -0.3383694017812684,
+        "qasper": 0.06903298142376312,
+        "qmsum": 0.10458338655802753,
+        "repobench-p": 0.18405916964730304,
+        "samsum": 0.09153656003634777,
+        "trec": 0.05448774107587445,
+        "triviaqa": 0.15089556257768091
+      },
+      "min": -0.3383694017812684,
+      "min_task": "passage_retrieval_en",
+      "max": 0.21905005825763188,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "lcc",
+        "passage_retrieval_en"
+      ]
+    },
+    "value_only": {
+      "full_15_task_mean": -0.249854126693509,
+      "loto_values": {
+        "2wikimqa": -0.26638588072119856,
+        "gov_report": -0.3097623201469269,
+        "hotpotqa": -0.295930125928843,
+        "lcc": 0.09544200711409755,
+        "multi_news": -0.24473447183050628,
+        "multifieldqa_en": -0.3055080030347041,
+        "musique": -0.2552383756905901,
+        "narrativeqa": -0.3098309248778048,
+        "passage_retrieval_en": -0.33912942145733105,
+        "qasper": -0.2024638097698735,
+        "qmsum": -0.25461314407353336,
+        "repobench-p": -0.21084370717161677,
+        "samsum": -0.3015072608515227,
+        "trec": -0.26770085002875965,
+        "triviaqa": -0.27960561193352157
+      },
+      "min": -0.33912942145733105,
+      "min_task": "passage_retrieval_en",
+      "max": 0.09544200711409755,
+      "max_task": "lcc",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "joint": {
+      "full_15_task_mean": -0.48327775727676775,
+      "loto_values": {
+        "2wikimqa": -0.4093736543648543,
+        "gov_report": -0.49376098484975006,
+        "hotpotqa": -0.5128496978347492,
+        "lcc": -0.46736902565367977,
+        "multi_news": -0.5162307608240618,
+        "multifieldqa_en": -0.3867849665882928,
+        "musique": -0.4451081723103116,
+        "narrativeqa": -0.5341051545363842,
+        "passage_retrieval_en": -0.6427975970822511,
+        "qasper": -0.4449825107638891,
+        "qmsum": -0.5004040283225379,
+        "repobench-p": -0.4017975970822511,
+        "samsum": -0.5468700001595428,
+        "trec": -0.5177975970822511,
+        "triviaqa": -0.4289346116967093
+      },
+      "min": -0.6427975970822511,
+      "min_task": "passage_retrieval_en",
+      "max": -0.3867849665882928,
+      "max_task": "multifieldqa_en",
+      "sign_changed_when_removing": []
+    },
+    "kivi4": {
+      "full_15_task_mean": 0.13679904705217397,
+      "loto_values": {
+        "2wikimqa": 0.13580433968843966,
+        "gov_report": 0.10627063049078249,
+        "hotpotqa": 0.14963275238843185,
+        "lcc": 0.18371326469875784,
+        "multi_news": 0.14618310299900153,
+        "multifieldqa_en": 0.128795350667424,
+        "musique": 0.14601358342764797,
+        "narrativeqa": 0.13678565382978067,
+        "passage_retrieval_en": 0.0037132646987578185,
+        "qasper": 0.1706458737554791,
+        "qmsum": 0.133488576192646,
+        "repobench-p": 0.16614183612732925,
+        "samsum": 0.14748999503966334,
+        "trec": 0.14657040755590067,
+        "triviaqa": 0.15073707422256735
+      },
+      "min": 0.0037132646987578185,
+      "min_task": "passage_retrieval_en",
+      "max": 0.18371326469875784,
+      "max_task": "lcc",
+      "sign_changed_when_removing": []
+    },
+    "key_minus_value": {
+      "full_15_task_mean": 0.3340426850309918,
+      "loto_values": {
+        "2wikimqa": 0.4854359389788304,
+        "gov_report": 0.35520049806721005,
+        "hotpotqa": 0.4087749754932623,
+        "lcc": -0.09852569460965165,
+        "multi_news": 0.32581338986314956,
+        "multifieldqa_en": 0.5070030297529169,
+        "musique": 0.4055180855148896,
+        "narrativeqa": 0.44933024758038265,
+        "passage_retrieval_en": 0.0007600196760626034,
+        "qasper": 0.2714967911936367,
+        "qmsum": 0.3591965306315609,
+        "repobench-p": 0.3949028768189198,
+        "samsum": 0.39304382088787054,
+        "trec": 0.3221885911046341,
+        "triviaqa": 0.43050117451120246
+      },
+      "min": -0.09852569460965165,
+      "min_task": "lcc",
+      "max": 0.5070030297529169,
+      "max_task": "multifieldqa_en",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "interaction": {
+      "full_15_task_mean": -0.3176121889207416,
+      "loto_values": {
+        "2wikimqa": -0.3620378319012875,
+        "gov_report": -0.2294368426231062,
+        "hotpotqa": -0.32976442147032553,
+        "lcc": -0.5597273452722231,
+        "multi_news": -0.3525752070261988,
+        "multifieldqa_en": -0.2827719902718015,
+        "musique": -0.34014950644402103,
+        "narrativeqa": -0.3637735523611574,
+        "passage_retrieval_en": 0.03470122615634826,
+        "qasper": -0.3115516824177788,
+        "qmsum": -0.35037427080703215,
+        "repobench-p": -0.3750130595579374,
+        "samsum": -0.33689929934436785,
+        "trec": -0.304584488129366,
+        "triviaqa": -0.30022456234086875
+      },
+      "min": -0.5597273452722231,
+      "min_task": "lcc",
+      "max": 0.03470122615634826,
+      "max_task": "passage_retrieval_en",
+      "sign_changed_when_removing": [
+        "passage_retrieval_en"
+      ]
+    }
+  },
+  "sensitive_task_rankings": {
+    "value_only_most_negative_5": [
+      "lcc",
+      "qasper",
+      "repobench-p",
+      "multi_news",
+      "qmsum"
+    ],
+    "key_only_most_negative_5": [
+      "2wikimqa",
+      "multifieldqa_en",
+      "repobench-p",
+      "triviaqa",
+      "musique"
+    ],
+    "joint_most_negative_5": [
+      "multifieldqa_en",
+      "repobench-p",
+      "2wikimqa",
+      "triviaqa",
+      "qasper"
+    ],
+    "interaction_most_negative_5": [
+      "passage_retrieval_en",
+      "gov_report",
+      "multifieldqa_en",
+      "triviaqa",
+      "trec"
+    ],
+    "largest_key_vs_value_gap_5": [
+      "lcc",
+      "passage_retrieval_en",
+      "multifieldqa_en",
+      "2wikimqa",
+      "narrativeqa"
+    ],
+    "value_only_ci_entirely_below_zero": [
+      "lcc"
+    ],
+    "key_only_ci_entirely_below_zero": [
+      "2wikimqa"
+    ],
+    "interaction_ci_entirely_below_zero": [
+      "gov_report",
+      "passage_retrieval_en"
+    ],
+    "highlighted_tasks": {
+      "lcc": {
+        "key_only": 1.306,
+        "value_only": -5.084,
+        "joint": -0.706,
+        "kivi4": -0.52,
+        "key_minus_value": 6.39,
+        "interaction": 3.072
+      },
+      "repobench-p": {
+        "key_only": -1.314,
+        "value_only": -0.796,
+        "joint": -1.624,
+        "kivi4": -0.274,
+        "key_minus_value": -0.518,
+        "interaction": 0.486
+      },
+      "passage_retrieval_en": {
+        "key_only": 6.0,
+        "value_only": 1.0,
+        "joint": 1.75,
+        "kivi4": 2.0,
+        "key_minus_value": 5.0,
+        "interaction": -5.25
+      },
+      "2wikimqa": {
+        "key_only": -1.8038724405446036,
+        "value_only": -0.01840957030585514,
+        "joint": -1.517935198043557,
+        "kivi4": 0.15072495014445472,
+        "key_minus_value": -1.785462870238748,
+        "interaction": 0.3043468128069015
+      },
+      "multifieldqa_en": {
+        "key_only": -1.5581019989927376,
+        "value_only": 0.529300142083223,
+        "joint": -1.834176826915417,
+        "kivi4": 0.24885079643867386,
+        "key_minus_value": -2.087402141075961,
+        "interaction": -0.8053749700059024
+      }
+    }
+  },
+  "limitations": [
+    "Each method has exactly one deterministic greedy-decoded prediction pass; no repeated seeds.",
+    "Bootstrap estimates benchmark sample/task uncertainty, not run-to-run or cross-hardware variance.",
+    "Predictions carry no sample ID; pairing relies on validated row order plus answers/all_classes/length equality.",
+    "The 15-task LongBench average differences are small and do not imply general model-quality differences.",
+    "Only one model (LongChat-7B), one context length, and one host/bit-configuration set is covered.",
+    "This analysis alone cannot establish that Value quantization is more sensitive than Key quantization across all models.",
+    "The interaction term is an operational ablation interaction, not evidence of a causal mechanism."
+  ]
+}
