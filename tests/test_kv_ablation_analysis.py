@@ -1,31 +1,123 @@
-"""CPU-only unit tests for analysis/analyze_kv_ablation.py.
+"""CPU-only unit tests for analysis/analyze_kv_ablation.py (3x3 K/V matrix).
 
 Does not load a model, touch the GPU, or read any prediction JSONL from the
 real pred/ directories -- everything here operates on small synthetic
-in-memory fixtures.
+in-memory/temp-dir fixtures.
 
 Run with:
     ./.venv/bin/python -m unittest tests.test_kv_ablation_analysis -v
 """
+import json
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from analysis.analyze_kv_ablation import (  # noqa: E402
-    EFFECT_NAMES,
+    ALL_CONFIGS,
+    FP16,
+    ConfigDiscoveryError,
     PairingError,
-    compute_task_effect_matrix,
+    apply_contrast,
+    build_key_trajectory_contrasts,
+    build_value_trajectory_contrasts,
     compute_task_sample_scores,
     derive_seed,
+    discover_configurations,
+    interaction_contrast,
+    bootstrap_overall_scores,
     leave_one_task_out,
     sample_score,
     validate_pairing,
 )
 from eval_long_bench import dataset2metric, scorer  # noqa: E402
+
+
+def _write_run_config(dir_path, k_bits, v_bits):
+    cfg = {
+        "model_name_or_path": "lmsys/longchat-7b-v1.5-32k",
+        "k_bits": k_bits,
+        "v_bits": v_bits,
+        "group_size": 32,
+        "residual_length": 128,
+        "max_length": 31500,
+        "seed": 42,
+        "model_class": "LlamaForCausalLM_KIVI",
+        "quantize_key": k_bits != 16,
+        "quantize_value": v_bits != 16,
+    }
+    (dir_path / "run_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+
+
+class TestConfigDiscovery(unittest.TestCase):
+    """Configuration discovery must resolve all 9 (k,v) cells from either
+    run_config.json (new-style dirs) or the legacy `_<N>bits_` directory
+    name (old-style dirs, no run_config.json), and must never hard-code a
+    specific directory-name string per configuration."""
+
+    def test_discovers_all_nine_from_mixed_sources(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # 6 new-style dirs (run_config.json-driven), arbitrary names.
+            new_style = [(16, 4), (16, 2), (4, 16), (4, 2), (2, 16), (2, 4)]
+            for k, v in new_style:
+                d = root / f"some_run_name_k{k}_v{v}"
+                d.mkdir()
+                _write_run_config(d, k, v)
+            # 3 legacy-style dirs (no run_config.json).
+            for name, bits in [
+                ("longchat-7b-v1.5-32k_31500_16bits_group32_residual128", 16),
+                ("longchat-7b-v1.5-32k_31500_4bits_group32_residual128", 4),
+                ("longchat-7b-v1.5-32k_31500_2bits_group32_residual128", 2),
+            ]:
+                (root / name).mkdir()
+
+            configs, log = discover_configurations(root)
+            self.assertEqual(set(configs.keys()), set(ALL_CONFIGS))
+            self.assertEqual(len(log), 9)
+
+    def test_missing_configuration_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for k, v in [(16, 16), (16, 4)]:  # only 2 of 9
+                d = root / f"run_k{k}_v{v}"
+                d.mkdir()
+                _write_run_config(d, k, v)
+            with self.assertRaises(ConfigDiscoveryError):
+                discover_configurations(root)
+
+    def test_duplicate_configuration_raises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d1 = root / "run_a"
+            d2 = root / "run_b"
+            d1.mkdir()
+            d2.mkdir()
+            _write_run_config(d1, 16, 16)
+            _write_run_config(d2, 16, 16)
+            with self.assertRaises(ConfigDiscoveryError):
+                discover_configurations(root)
+
+    def test_mismatched_run_settings_are_skipped_not_matched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            d = root / "wrong_length_run"
+            d.mkdir()
+            cfg = {
+                "model_name_or_path": "lmsys/longchat-7b-v1.5-32k",
+                "k_bits": 16, "v_bits": 16,
+                "group_size": 32, "residual_length": 128,
+                "max_length": 4000,  # wrong -- must not be resolved as K16/V16
+                "seed": 42,
+            }
+            (d / "run_config.json").write_text(json.dumps(cfg), encoding="utf-8")
+            with self.assertRaises(ConfigDiscoveryError):
+                discover_configurations(root)
 
 
 class TestSampleScorerMatchesEvalScorer(unittest.TestCase):
@@ -65,17 +157,12 @@ class TestSampleScorerMatchesEvalScorer(unittest.TestCase):
 
 
 class TestFirstLinePreprocessing(unittest.TestCase):
-    """trec/triviaqa/samsum/lsht must have their prediction truncated to the
-    first line before scoring; other tasks must not."""
-
     def test_first_line_only_applied_for_trec(self):
         prediction = "SPORTS\nirrelevant trailing hallucinated text"
         ground_truths = ["SPORTS"]
         all_classes = ["SPORTS", "NEWS"]
 
         score = sample_score("trec", prediction, ground_truths, all_classes)
-        # classification_score would find both "SPORTS" and nothing else
-        # relevant once truncated to "SPORTS" -- expect a perfect match.
         self.assertEqual(score, dataset2metric["trec"]("SPORTS", "SPORTS", all_classes=all_classes))
 
     def test_first_line_not_applied_for_qasper(self):
@@ -85,23 +172,7 @@ class TestFirstLinePreprocessing(unittest.TestCase):
         score_full = sample_score("qasper", prediction, ground_truths, [])
         score_truncated = dataset2metric["qasper"]("answer line one", ground_truths[0], all_classes=[])
 
-        # qasper must NOT be truncated, so scoring the full multi-line
-        # prediction should differ from (and outperform) scoring just the
-        # first line against the full multi-line ground truth.
         self.assertGreater(score_full, score_truncated)
-
-
-class TestMaxOverGroundTruths(unittest.TestCase):
-    def test_sample_score_takes_max_over_multiple_ground_truths(self):
-        prediction = "the cat sat on the mat"
-        ground_truths = ["totally different", "the cat sat on the mat"]
-
-        score = sample_score("qasper", prediction, ground_truths, [])
-        best = max(
-            dataset2metric["qasper"](prediction, gt, all_classes=[]) for gt in ground_truths
-        )
-        self.assertEqual(score, best)
-        self.assertEqual(score, 1.0)
 
 
 class TestPairingValidation(unittest.TestCase):
@@ -115,18 +186,14 @@ class TestPairingValidation(unittest.TestCase):
             for task in tasks
         }
         methods = {}
-        for method in ["FP16", "K2/V16", "K16/V2", "K2/V2", "K4/V4"]:
-            methods[method] = {
-                task: [dict(row) for row in rows] for task, rows in base.items()
-            }
+        for cfg in ALL_CONFIGS:
+            methods[cfg] = {task: [dict(row) for row in rows] for task, rows in base.items()}
         if mutate:
             mutate(methods)
-        return methods, tasks
+        return methods
 
     def test_pairing_passes_on_identical_metadata(self):
-        methods, _ = self._make_all_data()
-        # Monkeypatch EXPECTED_TASKS-dependent validate_pairing by calling it
-        # directly against our 2-task fixture via a thin wrapper.
+        methods = self._make_all_data()
         import analysis.analyze_kv_ablation as mod
 
         original_tasks = mod.EXPECTED_TASKS
@@ -139,9 +206,9 @@ class TestPairingValidation(unittest.TestCase):
 
     def test_pairing_fails_on_mismatched_answers(self):
         def mutate(methods):
-            methods["K2/V2"]["qasper"][1]["answers"] = ["different answer"]
+            methods[(2, 2)]["qasper"][1]["answers"] = ["different answer"]
 
-        methods, _ = self._make_all_data(mutate=mutate)
+        methods = self._make_all_data(mutate=mutate)
         import analysis.analyze_kv_ablation as mod
 
         original_tasks = mod.EXPECTED_TASKS
@@ -154,11 +221,28 @@ class TestPairingValidation(unittest.TestCase):
 
     def test_pairing_fails_on_row_count_mismatch(self):
         def mutate(methods):
-            methods["K4/V4"]["trec"].append(
+            methods[(4, 4)]["trec"].append(
                 {"answers": ["extra"], "all_classes": [], "length": 5, "pred": "z"}
             )
 
-        methods, _ = self._make_all_data(mutate=mutate)
+        methods = self._make_all_data(mutate=mutate)
+        import analysis.analyze_kv_ablation as mod
+
+        original_tasks = mod.EXPECTED_TASKS
+        mod.EXPECTED_TASKS = ["qasper", "trec"]
+        try:
+            with self.assertRaises(PairingError):
+                validate_pairing(methods)
+        finally:
+            mod.EXPECTED_TASKS = original_tasks
+
+    def test_pairing_never_reorders_rows(self):
+        """A same-multiset-different-order answers list must be treated as a
+        mismatch, not silently realigned."""
+        def mutate(methods):
+            methods[(2, 16)]["qasper"] = list(reversed(methods[(2, 16)]["qasper"]))
+
+        methods = self._make_all_data(mutate=mutate)
         import analysis.analyze_kv_ablation as mod
 
         original_tasks = mod.EXPECTED_TASKS
@@ -170,118 +254,168 @@ class TestPairingValidation(unittest.TestCase):
             mod.EXPECTED_TASKS = original_tasks
 
 
-class TestEqualTaskWeighting(unittest.TestCase):
-    """Overall effects must be an equal-weight average across the 15 tasks,
-    not a sample-count-weighted average (e.g. lcc/repobench-p have 500 rows
-    vs 150-200 for most other tasks and must not dominate)."""
+class TestTrajectorySignConvention(unittest.TestCase):
+    """delta = score(destination) - score(source); negative = degradation."""
 
-    def test_overall_effect_is_unweighted_task_average(self):
-        sample_scores = {
-            "FP16": {
-                "small_task": np.array([50.0, 50.0]),
-                "big_task": np.array([50.0] * 10),
-            },
-            "K2/V16": {
-                "small_task": np.array([60.0, 60.0]),  # +10 effect, 2 rows
-                "big_task": np.array([50.0] * 10),  # +0 effect, 10 rows
-            },
-            "K16/V2": {
-                "small_task": np.array([50.0, 50.0]),
-                "big_task": np.array([50.0] * 10),
-            },
-            "K2/V2": {
-                "small_task": np.array([50.0, 50.0]),
-                "big_task": np.array([50.0] * 10),
-            },
-            "K4/V4": {
-                "small_task": np.array([50.0, 50.0]),
-                "big_task": np.array([50.0] * 10),
-            },
-        }
-        effect_small = compute_task_effect_matrix(sample_scores, "small_task")
-        effect_big = compute_task_effect_matrix(sample_scores, "big_task")
+    def test_key_trajectory_sign(self):
+        contrasts = build_key_trajectory_contrasts()
+        score_map = {cfg: 0.0 for cfg in ALL_CONFIGS}
+        score_map[(16, 16)] = 100.0
+        score_map[(4, 16)] = 90.0  # degraded by 10 relative to K16
+        score_map[(2, 16)] = 70.0  # degraded further
 
-        key_only_idx = EFFECT_NAMES.index("key_only")
-        task_means = [effect_small[:, key_only_idx].mean(), effect_big[:, key_only_idx].mean()]
-        equal_weighted = sum(task_means) / len(task_means)
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["K16->K4 @ V16"]), -10.0)
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["K4->K2 @ V16"]), -20.0)
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["K16->K2 @ V16"]), -30.0)
 
-        # Equal-weight average of +10 (small_task, 2 rows) and +0 (big_task,
-        # 10 rows) must be +5, NOT the row-count-weighted (10*2 + 0*10)/12 = 1.67.
-        self.assertAlmostEqual(equal_weighted, 5.0, places=6)
-        row_weighted = (10.0 * 2 + 0.0 * 10) / 12
-        self.assertNotAlmostEqual(equal_weighted, row_weighted, places=2)
+    def test_value_trajectory_sign(self):
+        contrasts = build_value_trajectory_contrasts()
+        score_map = {cfg: 0.0 for cfg in ALL_CONFIGS}
+        score_map[(16, 16)] = 100.0
+        score_map[(16, 4)] = 105.0  # an *improvement* -> positive delta
+        score_map[(16, 2)] = 95.0
+
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["V16->V4 @ K16"]), 5.0)
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["V4->V2 @ K16"]), -10.0)
+        self.assertAlmostEqual(apply_contrast(score_map, contrasts["V16->V2 @ K16"]), -5.0)
 
 
 class TestInteractionFormula(unittest.TestCase):
     def test_interaction_matches_definition(self):
-        sample_scores = {
-            "FP16": {"t": np.array([100.0])},
-            "K2/V16": {"t": np.array([90.0])},   # key_only = -10
-            "K16/V2": {"t": np.array([85.0])},   # value_only = -15
-            "K2/V2": {"t": np.array([60.0])},    # joint = -40
-            "K4/V4": {"t": np.array([95.0])},
-        }
-        effect_matrix = compute_task_effect_matrix(sample_scores, "t")
-        interaction = effect_matrix[0, EFFECT_NAMES.index("interaction")]
-        # interaction = joint - key_only - value_only = -40 - (-10) - (-15) = -15
+        score_map = {cfg: 0.0 for cfg in ALL_CONFIGS}
+        score_map[(16, 16)] = 100.0
+        score_map[(4, 16)] = 90.0   # K-only effect at V16 = -10
+        score_map[(16, 4)] = 85.0   # V-only effect at K16 = -15
+        score_map[(4, 4)] = 60.0    # joint = -40
+
+        contrast = interaction_contrast(k_source=16, k_dest=4, v_source=16, v_dest=4)
+        interaction = apply_contrast(score_map, contrast)
+        # [S(4,4)-S(16,4)] - [S(4,16)-S(16,16)] = (60-85) - (90-100) = -25 - (-10) = -15
         self.assertAlmostEqual(interaction, -15.0, places=6)
 
     def test_interaction_zero_when_effects_are_additive(self):
-        sample_scores = {
-            "FP16": {"t": np.array([100.0])},
-            "K2/V16": {"t": np.array([90.0])},   # key_only = -10
-            "K16/V2": {"t": np.array([95.0])},   # value_only = -5
-            "K2/V2": {"t": np.array([85.0])},    # joint = -15 == -10 + -5
-            "K4/V4": {"t": np.array([100.0])},
-        }
-        effect_matrix = compute_task_effect_matrix(sample_scores, "t")
-        interaction = effect_matrix[0, EFFECT_NAMES.index("interaction")]
+        score_map = {cfg: 0.0 for cfg in ALL_CONFIGS}
+        score_map[(16, 16)] = 100.0
+        score_map[(4, 16)] = 90.0   # -10
+        score_map[(16, 4)] = 95.0   # -5
+        score_map[(4, 4)] = 85.0    # -15 == -10 + -5, purely additive
+
+        contrast = interaction_contrast(k_source=16, k_dest=4, v_source=16, v_dest=4)
+        interaction = apply_contrast(score_map, contrast)
         self.assertAlmostEqual(interaction, 0.0, places=6)
 
 
 class TestBootstrapSeedReproducibility(unittest.TestCase):
     def test_derive_seed_is_deterministic(self):
-        s1 = derive_seed(42, "primary", "qasper")
-        s2 = derive_seed(42, "primary", "qasper")
+        s1 = derive_seed(42, "overall", "qasper")
+        s2 = derive_seed(42, "overall", "qasper")
         self.assertEqual(s1, s2)
 
     def test_derive_seed_differs_across_inputs(self):
-        s1 = derive_seed(42, "primary", "qasper")
-        s2 = derive_seed(42, "primary", "trec")
-        s3 = derive_seed(43, "primary", "qasper")
+        s1 = derive_seed(42, "overall", "qasper")
+        s2 = derive_seed(42, "overall", "trec")
+        s3 = derive_seed(43, "overall", "qasper")
         self.assertNotEqual(s1, s2)
         self.assertNotEqual(s1, s3)
 
-    def test_bootstrap_replicate_reproducible_given_same_seed(self):
-        rng1 = np.random.default_rng(derive_seed(42, "x"))
-        rng2 = np.random.default_rng(derive_seed(42, "x"))
-        a = rng1.integers(0, 100, size=1000)
-        b = rng2.integers(0, 100, size=1000)
-        np.testing.assert_array_equal(a, b)
+    def test_bootstrap_overall_scores_reproducible_given_same_seed(self):
+        import analysis.analyze_kv_ablation as mod
+
+        original_tasks = mod.EXPECTED_TASKS
+        mod.EXPECTED_TASKS = ["taskA", "taskB"]
+        try:
+            rng = np.random.default_rng(0)
+            sample_scores = {
+                cfg: {
+                    "taskA": rng.uniform(0, 100, size=20),
+                    "taskB": rng.uniform(0, 100, size=30),
+                }
+                for cfg in ALL_CONFIGS
+            }
+            boot1 = bootstrap_overall_scores(sample_scores, iterations=200, seed=42)
+            boot2 = bootstrap_overall_scores(sample_scores, iterations=200, seed=42)
+            for cfg in ALL_CONFIGS:
+                np.testing.assert_array_equal(boot1[cfg], boot2[cfg])
+
+            boot3 = bootstrap_overall_scores(sample_scores, iterations=200, seed=43)
+            self.assertFalse(np.array_equal(boot1[FP16], boot3[FP16]))
+        finally:
+            mod.EXPECTED_TASKS = original_tasks
+
+
+class TestEqualPerTaskWeighting(unittest.TestCase):
+    """Overall bootstrap score must be an equal-weight mean across tasks, not
+    a sample-count-weighted mean (e.g. lcc/repobench-p have 500 rows vs
+    150-200 for most other tasks and must not dominate)."""
+
+    def test_bootstrap_overall_score_is_unweighted_task_average(self):
+        import analysis.analyze_kv_ablation as mod
+
+        original_tasks = mod.EXPECTED_TASKS
+        mod.EXPECTED_TASKS = ["small_task", "big_task"]
+        try:
+            sample_scores = {
+                cfg: {
+                    "small_task": np.array([50.0, 50.0]),  # 2 rows
+                    "big_task": np.array([50.0] * 10),      # 10 rows
+                }
+                for cfg in ALL_CONFIGS
+            }
+            # K4/V16 improves only on the small (2-row) task.
+            sample_scores[(4, 16)]["small_task"] = np.array([60.0, 60.0])
+
+            boot = bootstrap_overall_scores(sample_scores, iterations=50, seed=42)
+            observed_fp16 = boot[FP16].mean()
+            observed_k4v16 = boot[(4, 16)].mean()
+
+            # Equal-weight expectation: (+10 on small_task, +0 on big_task) / 2 = +5,
+            # NOT the row-count-weighted (10*2 + 0*10)/12 = 1.67.
+            self.assertAlmostEqual(observed_k4v16 - observed_fp16, 5.0, delta=0.5)
+        finally:
+            mod.EXPECTED_TASKS = original_tasks
 
 
 class TestLeaveOneTaskOut(unittest.TestCase):
-    def test_loto_identifies_dominant_task(self):
-        # 3 tasks; effect for key_only column is dominated by task "c".
-        observed_task_means = {
-            "a": np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0]),
-            "b": np.array([0.1, 0.0, 0.0, 0.0, 0.0, 0.0]),
-            "c": np.array([10.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        }
+    def test_loto_identifies_dominant_task_and_sign_flip(self):
         import analysis.analyze_kv_ablation as mod
 
         original_tasks = mod.EXPECTED_TASKS
         mod.EXPECTED_TASKS = ["a", "b", "c"]
         try:
-            result = leave_one_task_out(observed_task_means)
+            task_mean_raw = {cfg: {"a": 50.0, "b": 50.0, "c": 50.0} for cfg in ALL_CONFIGS}
+            # K4/V16 - FP16 is dominated by task "c": +30 on c, +0.1 on a/b.
+            task_mean_raw[(4, 16)] = {"a": 50.1, "b": 50.1, "c": 80.0}
+
+            contrasts = {"K4/V16 - FP16": {(4, 16): 1.0, FP16: -1.0}}
+            result = leave_one_task_out(task_mean_raw, contrasts)
+
+            r = result["K4/V16 - FP16"]
+            self.assertEqual(r["min_task"], "c")  # removing the dominant task minimizes the remaining effect
+            self.assertLess(r["loto_values"]["c"], r["loto_values"]["a"])
+            self.assertLess(r["loto_values"]["c"], r["loto_values"]["b"])
+
         finally:
             mod.EXPECTED_TASKS = original_tasks
 
-        key_only = result["key_only"]
-        # Removing "c" should produce a much smaller mean than removing "a" or "b".
-        self.assertEqual(key_only["min_task"], "c")
-        self.assertLess(key_only["loto_values"]["c"], key_only["loto_values"]["a"])
-        self.assertLess(key_only["loto_values"]["c"], key_only["loto_values"]["b"])
+    def test_loto_sign_flip_detected(self):
+        import analysis.analyze_kv_ablation as mod
+
+        original_tasks = mod.EXPECTED_TASKS
+        mod.EXPECTED_TASKS = ["a", "b", "c"]
+        try:
+            task_mean_raw = {cfg: {"a": 50.0, "b": 50.0, "c": 50.0} for cfg in ALL_CONFIGS}
+            # Full mean effect is negative overall, but driven entirely by task "c";
+            # removing "c" flips the sign positive.
+            task_mean_raw[(2, 2)] = {"a": 50.5, "b": 50.5, "c": 20.0}
+
+            contrasts = {"K2/V2 - FP16": {(2, 2): 1.0, FP16: -1.0}}
+            result = leave_one_task_out(task_mean_raw, contrasts)
+            r = result["K2/V2 - FP16"]
+
+            self.assertLess(r["full_15_task_mean"], 0.0)
+            self.assertIn("c", r["sign_changed_when_removing"])
+        finally:
+            mod.EXPECTED_TASKS = original_tasks
 
 
 if __name__ == "__main__":

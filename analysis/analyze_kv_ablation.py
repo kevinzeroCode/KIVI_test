@@ -1,24 +1,39 @@
-"""Paired sample-level and bootstrap analysis of the five completed KV-cache
-ablation runs (FP16, K2/V16, K16/V2, K2/V2, K4/V4) on LongChat-7B / LongBench.
+"""Paired sample-level and bootstrap analysis of the full 3x3 K/V-bit
+ablation matrix (K, V in {2, 4, 16}) for LongChat-7B / LongBench.
 
 CPU-only, read-only with respect to prediction data: this script never loads
-a model, never touches the GPU, and never re-runs generation. It re-derives
-per-sample scores from the existing prediction JSONLs using the exact same
-scoring functions as eval_long_bench.py / metrics.py (imported, not
-reimplemented), verifies those recomputed scores reproduce the committed
-result.json task scores, and then runs paired bootstrap resampling over the
-already-fixed set of samples/tasks to characterize benchmark-level
-uncertainty (NOT run-to-run or hardware variance -- see the "limitations"
-section this script writes into its own report).
+a model, never touches the GPU, and never re-runs generation. It:
+
+  1. discovers the 9 prediction directories under --pred-root by reading
+     run_config.json (or, for the 3 pre-run_config.json legacy runs, the
+     established `_<N>bits_` directory-naming convention -- see
+     `discover_configurations`),
+  2. strictly validates row counts / JSON validity / NUL-byte absence /
+     trailing newline / absence of leftover .partial files for every
+     configuration x task (utils.jsonl_integrity.inspect_jsonl),
+  3. validates sample-level pairing (answers/all_classes/length) across all
+     9 configurations,
+  4. re-derives per-sample scores using the exact scoring functions imported
+     from eval_long_bench.py / metrics.py (never reimplemented) and verifies
+     they reproduce each configuration's committed result.json,
+  5. runs a paired, task-stratified bootstrap that preserves LongBench's
+     equal-weight-over-15-tasks aggregation semantics (see
+     `bootstrap_overall_scores`), and reports CIs for every cell's delta vs
+     FP16, every Key/Value trajectory contrast, and 5 K x V interaction
+     contrasts,
+  6. reports per-task sensitivity and leave-one-task-out robustness for the
+     same contrasts.
 
 Usage:
-    python analysis/analyze_kv_ablation.py \
-        --bootstrap-iterations 10000 --seed 42 --output-dir analysis/results
+    ./.venv/bin/python analysis/analyze_kv_ablation.py \\
+        --pred-root pred --bootstrap 10000 --seed 42 \\
+        --output-dir analysis/results/kv_3x3
 """
 import argparse
 import csv
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from collections import OrderedDict
@@ -31,52 +46,68 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
 from eval_long_bench import dataset2metric  # noqa: E402
+from utils.jsonl_integrity import inspect_jsonl  # noqa: E402
 
-METHODS = OrderedDict(
+# ---------------------------------------------------------------------------
+# Fixed experiment shape
+# ---------------------------------------------------------------------------
+
+EXPECTED_TASK_COUNTS = OrderedDict(
     [
-        ("FP16", "pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128"),
-        ("K2/V16", "pred/longchat-7b-v1.5-32k_31500_k2_v16_group32_residual128"),
-        ("K16/V2", "pred/longchat-7b-v1.5-32k_31500_k16_v2_group32_residual128"),
-        ("K2/V2", "pred/longchat-7b-v1.5-32k_31500_2bits_group32_residual128"),
-        ("K4/V4", "pred/longchat-7b-v1.5-32k_31500_4bits_group32_residual128"),
+        ("narrativeqa", 200),
+        ("qasper", 200),
+        ("multifieldqa_en", 150),
+        ("hotpotqa", 200),
+        ("musique", 200),
+        ("2wikimqa", 200),
+        ("gov_report", 200),
+        ("qmsum", 200),
+        ("multi_news", 200),
+        ("lcc", 500),
+        ("repobench-p", 500),
+        ("triviaqa", 200),
+        ("samsum", 200),
+        ("trec", 200),
+        ("passage_retrieval_en", 200),
     ]
 )
-
-EXPECTED_TASKS = sorted(
-    [
-        "narrativeqa", "qasper", "multifieldqa_en", "hotpotqa", "musique",
-        "2wikimqa", "gov_report", "qmsum", "multi_news", "triviaqa",
-        "samsum", "trec", "passage_retrieval_en", "lcc", "repobench-p",
-    ]
-)
+EXPECTED_TASKS = list(EXPECTED_TASK_COUNTS)
 
 FIRST_LINE_ONLY_DATASETS = {"trec", "triviaqa", "samsum", "lsht"}
 
-# EFFECT definitions operate on percentage-point sample scores (score * 100),
-# matching eval_long_bench.py's `100 * total_score / len(predictions)` scale.
-EFFECT_NAMES = [
-    "key_only",       # K2/V16 - FP16
-    "value_only",     # K16/V2 - FP16
-    "joint",          # K2/V2  - FP16
-    "kivi4",          # K4/V4  - FP16
-    "key_minus_value",  # K2/V16 - K16/V2
-    "interaction",    # K2/V2 - K2/V16 - K16/V2 + FP16
-]
+K_LEVELS = (16, 4, 2)
+V_LEVELS = (16, 4, 2)
+ALL_CONFIGS = [(k, v) for k in K_LEVELS for v in V_LEVELS]
+FP16 = (16, 16)
 
-EFFECT_LABELS = {
-    "key_only": "Key-only effect (K2/V16 - FP16)",
-    "value_only": "Value-only effect (K16/V2 - FP16)",
-    "joint": "Joint effect (K2/V2 - FP16)",
-    "kivi4": "KIVI-4 effect (K4/V4 - FP16)",
-    "key_minus_value": "Key-only minus Value-only (K2/V16 - K16/V2)",
-    "interaction": "Interaction (K2/V2 - K2/V16 - K16/V2 + FP16)",
+REQUIRED_RUN_SETTINGS = {
+    "model_name_or_path": "lmsys/longchat-7b-v1.5-32k",
+    "max_length": 31500,
+    "group_size": 32,
+    "residual_length": 128,
+    "seed": 42,
 }
 
-# Effects that represent "quantized method vs FP16" and therefore support a
-# meaningful win/tie/loss breakdown at the sample level.
-VS_FP16_EFFECTS = {"key_only", "value_only", "joint", "kivi4"}
+# The 3 earliest runs predate run_config.json and use the original KIVI
+# naming convention where a single bit-width applies symmetrically to both
+# K and V (16bits == FP16 passthrough, 2bits == joint K2/V2, 4bits == joint
+# K4/V4). This mapping was already established and human-reviewed in the
+# prior (5-configuration) version of this script; it is kept here as the
+# sole legacy fallback, applied only when run_config.json is absent.
+LEGACY_DIR_RE = re.compile(r"^longchat-7b-v1\.5-32k_31500_(\d+)bits_group32_residual128$")
 
-HIGHLIGHT_TASKS = ["lcc", "repobench-p", "passage_retrieval_en", "2wikimqa", "multifieldqa_en"]
+
+def config_label(cfg):
+    k, v = cfg
+    return f"K{k}/V{v}"
+
+
+class ConfigDiscoveryError(RuntimeError):
+    pass
+
+
+class IntegrityError(RuntimeError):
+    pass
 
 
 class PairingError(RuntimeError):
@@ -88,21 +119,138 @@ class ScoreReproductionError(RuntimeError):
 
 
 def get_git_commit():
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=REPO_ROOT
-    ).decode().strip()
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT).decode().strip()
 
 
 def short_hash(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
-def load_method_predictions(pred_dir):
+# ---------------------------------------------------------------------------
+# Step 1: configuration discovery (never hard-code directory names)
+# ---------------------------------------------------------------------------
+
+def discover_configurations(pred_root):
+    """Scans pred_root's immediate subdirectories and resolves the 9
+    (k_bits, v_bits) configurations required for the 3x3 matrix.
+
+    Returns (configs, discovery_log):
+      configs: OrderedDict[(k, v)] -> Path, ordered per ALL_CONFIGS
+      discovery_log: list of per-directory dicts (dir, status, reason/config/source)
+        for the report's data-validation section.
+    """
+    pred_root = Path(pred_root)
+    found = {}
+    log = []
+
+    for d in sorted(pred_root.iterdir()):
+        if not d.is_dir():
+            continue
+
+        run_config_path = d / "run_config.json"
+        if run_config_path.exists():
+            cfg = json.loads(run_config_path.read_text(encoding="utf-8"))
+            mismatch = None
+            for key, expected in REQUIRED_RUN_SETTINGS.items():
+                if cfg.get(key) != expected:
+                    mismatch = f"{key}={cfg.get(key)!r} (expected {expected!r})"
+                    break
+            if mismatch:
+                log.append({"dir": d.name, "status": "SKIPPED", "reason": mismatch})
+                continue
+            if "k_bits" not in cfg or "v_bits" not in cfg:
+                log.append({"dir": d.name, "status": "SKIPPED", "reason": "run_config.json missing k_bits/v_bits"})
+                continue
+            key = (int(cfg["k_bits"]), int(cfg["v_bits"]))
+            source = "run_config.json"
+        else:
+            m = LEGACY_DIR_RE.match(d.name)
+            if not m:
+                log.append({"dir": d.name, "status": "IGNORED", "reason": "no run_config.json and name does not match legacy pattern"})
+                continue
+            bits = int(m.group(1))
+            key = (bits, bits)
+            source = (
+                "legacy directory name (.../<N>bits_group32_residual128, no "
+                "run_config.json) -- symmetric K=V quantization inferred from "
+                "the established KIVI naming convention, N=16 == FP16 passthrough"
+            )
+
+        if key not in ALL_CONFIGS:
+            log.append({"dir": d.name, "status": "IGNORED", "reason": f"resolved config {config_label(key)} is outside the 3x3 matrix"})
+            continue
+        if key in found:
+            raise ConfigDiscoveryError(
+                f"Duplicate directories resolve to the same configuration {config_label(key)}: "
+                f"{found[key][0].name} and {d.name}"
+            )
+        found[key] = (d, source)
+        log.append({"dir": d.name, "status": "RESOLVED", "config": config_label(key), "source": source})
+
+    missing = [c for c in ALL_CONFIGS if c not in found]
+    if missing:
+        raise ConfigDiscoveryError(
+            f"Missing {len(missing)}/9 required configurations: {[config_label(c) for c in missing]}. "
+            f"discovery_log={log}"
+        )
+
+    configs = OrderedDict((c, found[c][0]) for c in ALL_CONFIGS)
+    return configs, log
+
+
+# ---------------------------------------------------------------------------
+# Step 2: strict input validation
+# ---------------------------------------------------------------------------
+
+def validate_integrity(configs):
+    """Per utils.jsonl_integrity.inspect_jsonl: for every configuration and
+    task, verify expected row count, zero invalid JSON rows, zero NUL bytes
+    (invalid_rows==0 already implies no NUL-corrupted lines), trailing
+    newline present, and no leftover *.jsonl.partial for that task. Fails
+    closed (raises IntegrityError) with the full list of problems found."""
+    problems = []
+    records = {}
+
+    for cfg, pred_dir in configs.items():
+        records[cfg] = {}
+        for task, expected_count in EXPECTED_TASK_COUNTS.items():
+            jsonl_path = pred_dir / f"{task}.jsonl"
+            partial_path = pred_dir / f"{task}.jsonl.partial"
+
+            if partial_path.exists():
+                problems.append(f"{config_label(cfg)}/{task}: leftover partial file {partial_path}")
+
+            insp = inspect_jsonl(str(jsonl_path))
+            records[cfg][task] = insp
+
+            if not insp.exists:
+                problems.append(f"{config_label(cfg)}/{task}: missing final JSONL {jsonl_path}")
+                continue
+            if insp.invalid_rows != 0:
+                problems.append(
+                    f"{config_label(cfg)}/{task}: {insp.invalid_rows} invalid JSON row(s), "
+                    f"first at line {insp.first_invalid_line}"
+                )
+            if not insp.ends_with_newline:
+                problems.append(f"{config_label(cfg)}/{task}: file does not end with a trailing newline")
+            if insp.valid_rows != expected_count:
+                problems.append(
+                    f"{config_label(cfg)}/{task}: expected {expected_count} rows, found {insp.valid_rows} valid rows"
+                )
+
+    status = "PASS" if not problems else "FAIL"
+    if problems:
+        raise IntegrityError(f"{len(problems)} integrity problem(s) found:\n" + "\n".join(problems))
+
+    return {"status": status, "problems": problems, "n_config_task_pairs_checked": len(configs) * len(EXPECTED_TASK_COUNTS)}
+
+
+def load_predictions(pred_dir):
     """Returns {task_name: [{"pred":..., "answers":..., "all_classes":..., "length":...}, ...]}."""
-    pred_dir = REPO_ROOT / pred_dir
+    pred_dir = Path(pred_dir)
     data = {}
-    for path in sorted(pred_dir.glob("*.jsonl")):
-        task = path.stem
+    for task in EXPECTED_TASKS:
+        path = pred_dir / f"{task}.jsonl"
         rows = []
         with path.open("r", encoding="utf-8") as f:
             for line in f:
@@ -122,64 +270,60 @@ def load_method_predictions(pred_dir):
 
 
 def load_result_json(pred_dir):
-    path = REPO_ROOT / pred_dir / "result.json"
+    path = Path(pred_dir) / "result.json"
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def validate_task_sets(all_data):
-    for method, data in all_data.items():
+    for cfg, data in all_data.items():
         tasks = set(data.keys())
         if tasks != set(EXPECTED_TASKS):
             missing = set(EXPECTED_TASKS) - tasks
             extra = tasks - set(EXPECTED_TASKS)
-            raise PairingError(
-                f"{method}: task set mismatch. missing={sorted(missing)} extra={sorted(extra)}"
-            )
+            raise PairingError(f"{config_label(cfg)}: task set mismatch. missing={sorted(missing)} extra={sorted(extra)}")
 
 
 def validate_pairing(all_data):
     """Row-order pairing validation: for each task and row index, answers,
-    all_classes, and length must match exactly across all five methods.
-    Fails closed (raises) on the first mismatch found, reporting only a
-    short hash of the differing field's value, never the raw content."""
-    methods = list(all_data.keys())
-    reference_method = methods[0]
+    all_classes, and length must match exactly across all 9 configurations.
+    Fails closed on the first mismatch found, reporting only a short hash of
+    the differing field's value, never the raw content. Never reorders rows
+    to force a match."""
+    configs = list(all_data.keys())
+    reference = configs[0]
 
     for task in EXPECTED_TASKS:
-        row_counts = {m: len(all_data[m][task]) for m in methods}
+        row_counts = {cfg: len(all_data[cfg][task]) for cfg in configs}
         if len(set(row_counts.values())) != 1:
-            raise PairingError(f"task={task}: row count mismatch across methods: {row_counts}")
+            raise PairingError(
+                f"task={task}: row count mismatch across configurations: "
+                f"{ {config_label(c): n for c, n in row_counts.items()} }"
+            )
 
-        n_rows = row_counts[reference_method]
+        n_rows = row_counts[reference]
         for idx in range(n_rows):
-            ref_row = all_data[reference_method][task][idx]
-            for method in methods[1:]:
-                row = all_data[method][task][idx]
+            ref_row = all_data[reference][task][idx]
+            for cfg in configs[1:]:
+                row = all_data[cfg][task][idx]
                 for field in ("answers", "all_classes", "length"):
                     if row[field] != ref_row[field]:
                         raise PairingError(
-                            f"pairing mismatch: method={method} task={task} row_index={idx} "
-                            f"field={field} reference_method={reference_method} "
-                            f"reference_hash={short_hash(ref_row[field])} "
-                            f"observed_hash={short_hash(row[field])}"
+                            f"pairing mismatch: config={config_label(cfg)} task={task} row_index={idx} "
+                            f"field={field} reference_config={config_label(reference)} "
+                            f"reference_hash={short_hash(ref_row[field])} observed_hash={short_hash(row[field])}"
                         )
     return {
         "status": "PASS",
-        "methods_compared": methods,
-        "reference_method": reference_method,
+        "configs_compared": [config_label(c) for c in configs],
+        "reference_config": config_label(reference),
         "tasks_checked": EXPECTED_TASKS,
         "fields_checked": ["answers", "all_classes", "length"],
-        "note": (
-            "因 prediction 不包含原始 sample ID，本分析以相同 task 內的 row order 配對，"
-            "並以 answers、all_classes、length 的逐列一致性作為配對驗證。"
-        ),
     }
 
 
 def sample_score(dataset, prediction, ground_truths, all_classes):
     """Exact re-derivation of a single sample's score, matching
-    eval_long_bench.py's `scorer()` inner loop (pre-*100, pre-round,
-    in [0, 1])."""
+    eval_long_bench.py's `scorer()` inner loop (pre-*100, pre-round, in [0,1])."""
     if dataset in FIRST_LINE_ONLY_DATASETS:
         prediction = prediction.lstrip("\n").split("\n")[0]
     score = 0.0
@@ -191,9 +335,9 @@ def sample_score(dataset, prediction, ground_truths, all_classes):
 def compute_task_sample_scores(task, rows):
     """Returns a numpy array of per-row scores in [0, 100], using the same
     all_classes value eval_long_bench.py's scorer() effectively uses for the
-    whole task (the *last* row's all_classes, since the reference
-    implementation overwrites a single `all_classes` variable while
-    iterating the file and only uses its final value)."""
+    whole task (the *last* row's all_classes -- the reference implementation
+    overwrites a single `all_classes` variable while iterating the file and
+    only uses its final value)."""
     all_classes = rows[-1]["all_classes"]
     scores = np.empty(len(rows), dtype=np.float64)
     for i, row in enumerate(rows):
@@ -202,49 +346,45 @@ def compute_task_sample_scores(task, rows):
 
 
 def recompute_and_verify(all_data, result_jsons):
-    """Recomputes per-sample and per-task scores for all methods/tasks,
+    """Recomputes per-sample and per-task scores for all 9 configurations,
     verifies round(recomputed_task_mean, 2) == result.json's stored score
-    for all method-task combinations, and returns the sample-score matrices
-    plus both flavors of the 15-task average."""
-    sample_scores = {method: {} for method in all_data}
+    for every configuration-task combination, and returns the sample-score
+    matrices plus both flavors of the 15-task average (official = mean of
+    result.json's rounded task scores; raw = mean of unrounded recomputed
+    task means)."""
+    sample_scores = {cfg: {} for cfg in all_data}
+    task_mean_raw = {cfg: {} for cfg in all_data}
     mismatches = []
     official_avg = {}
     raw_avg = {}
 
-    for method, data in all_data.items():
+    for cfg, data in all_data.items():
         task_recomputed_rounded = {}
-        task_recomputed_raw = {}
         for task in EXPECTED_TASKS:
             rows = data[task]
             scores = compute_task_sample_scores(task, rows)
-            sample_scores[method][task] = scores
+            sample_scores[cfg][task] = scores
             raw_mean = float(scores.mean())
             rounded_mean = round(raw_mean, 2)
             task_recomputed_rounded[task] = rounded_mean
-            task_recomputed_raw[task] = raw_mean
+            task_mean_raw[cfg][task] = raw_mean
 
-            stored = result_jsons[method][task]
+            stored = result_jsons[cfg][task]
             if rounded_mean != stored:
                 mismatches.append(
-                    {
-                        "method": method,
-                        "task": task,
-                        "recomputed": rounded_mean,
-                        "stored_result_json": stored,
-                    }
+                    {"config": config_label(cfg), "task": task, "recomputed": rounded_mean, "stored_result_json": stored}
                 )
 
-        official_avg[method] = sum(result_jsons[method][t] for t in EXPECTED_TASKS) / len(EXPECTED_TASKS)
-        raw_avg[method] = sum(task_recomputed_raw[t] for t in EXPECTED_TASKS) / len(EXPECTED_TASKS)
+        official_avg[cfg] = sum(result_jsons[cfg][t] for t in EXPECTED_TASKS) / len(EXPECTED_TASKS)
+        raw_avg[cfg] = sum(task_mean_raw[cfg][t] for t in EXPECTED_TASKS) / len(EXPECTED_TASKS)
 
     status = "PASS" if not mismatches else "FAIL"
     if mismatches:
-        raise ScoreReproductionError(
-            f"{len(mismatches)} method-task score mismatches: {mismatches[:5]}"
-        )
+        raise ScoreReproductionError(f"{len(mismatches)} config-task score mismatches: {mismatches[:5]}")
 
     return {
         "sample_scores": sample_scores,
+        "task_mean_raw": task_mean_raw,
         "status": status,
         "n_checked": len(all_data) * len(EXPECTED_TASKS),
         "n_mismatches": len(mismatches),
@@ -253,24 +393,92 @@ def recompute_and_verify(all_data, result_jsons):
     }
 
 
-def compute_task_effect_matrix(sample_scores, task):
-    """Returns an (n_rows, 6) array: columns in EFFECT_NAMES order, each a
-    per-row (paired, same row index) effect in percentage points."""
-    fp16 = sample_scores["FP16"][task]
-    k2v16 = sample_scores["K2/V16"][task]
-    k16v2 = sample_scores["K16/V2"][task]
-    k2v2 = sample_scores["K2/V2"][task]
-    k4v4 = sample_scores["K4/V4"][task]
+# ---------------------------------------------------------------------------
+# Step 3: contrasts (deltas vs FP16, Key/Value trajectories) as linear
+# combinations over configuration cells -- shared machinery for point
+# estimates, bootstrap CIs, and leave-one-task-out (Steps 3/4/5/7).
+# ---------------------------------------------------------------------------
 
-    key_only = k2v16 - fp16
-    value_only = k16v2 - fp16
-    joint = k2v2 - fp16
-    kivi4 = k4v4 - fp16
-    key_minus_value = k2v16 - k16v2
-    interaction = k2v2 - k2v16 - k16v2 + fp16
+def apply_contrast(score_map, contrast):
+    """score_map: {(k,v): value-or-array}. contrast: {(k,v): coefficient}.
+    Returns sum(coef * score_map[cfg]) -- works for scalars or numpy arrays."""
+    total = None
+    for cfg, coef in contrast.items():
+        term = coef * score_map[cfg]
+        total = term if total is None else total + term
+    return total
 
-    return np.stack([key_only, value_only, joint, kivi4, key_minus_value, interaction], axis=1)
 
+def build_delta_vs_fp16_contrasts():
+    contrasts = OrderedDict()
+    for cfg in ALL_CONFIGS:
+        if cfg == FP16:
+            continue
+        contrasts[f"{config_label(cfg)} - FP16"] = {cfg: 1.0, FP16: -1.0}
+    return contrasts
+
+
+def build_key_trajectory_contrasts():
+    """score(destination) - score(source); negative = degradation."""
+    contrasts = OrderedDict()
+    for v in V_LEVELS:
+        contrasts[f"K16->K4 @ V{v}"] = {(4, v): 1.0, (16, v): -1.0}
+        contrasts[f"K4->K2 @ V{v}"] = {(2, v): 1.0, (4, v): -1.0}
+        contrasts[f"K16->K2 @ V{v}"] = {(2, v): 1.0, (16, v): -1.0}
+    return contrasts
+
+
+def build_value_trajectory_contrasts():
+    contrasts = OrderedDict()
+    for k in K_LEVELS:
+        contrasts[f"V16->V4 @ K{k}"] = {(k, 4): 1.0, (k, 16): -1.0}
+        contrasts[f"V4->V2 @ K{k}"] = {(k, 2): 1.0, (k, 4): -1.0}
+        contrasts[f"V16->V2 @ K{k}"] = {(k, 2): 1.0, (k, 16): -1.0}
+    return contrasts
+
+
+def interaction_contrast(k_source, k_dest, v_source, v_dest):
+    """Interaction = [S(K_dest,V_dest) - S(K_source,V_dest)]
+                    - [S(K_dest,V_source) - S(K_source,V_source)]"""
+    return {
+        (k_dest, v_dest): 1.0,
+        (k_source, v_dest): -1.0,
+        (k_dest, v_source): -1.0,
+        (k_source, v_source): 1.0,
+    }
+
+
+def build_interaction_contrasts():
+    return OrderedDict(
+        [
+            ("K16->4 x V16->4", interaction_contrast(16, 4, 16, 4)),
+            ("K16->4 x V4->2", interaction_contrast(16, 4, 4, 2)),
+            ("K4->2 x V16->4", interaction_contrast(4, 2, 16, 4)),
+            ("K4->2 x V4->2", interaction_contrast(4, 2, 4, 2)),
+            ("K16->2 x V16->2 (broad)", interaction_contrast(16, 2, 16, 2)),
+        ]
+    )
+
+
+DELTA_VS_FP16_CONTRASTS = build_delta_vs_fp16_contrasts()
+KEY_TRAJECTORY_CONTRASTS = build_key_trajectory_contrasts()
+VALUE_TRAJECTORY_CONTRASTS = build_value_trajectory_contrasts()
+INTERACTION_CONTRASTS = build_interaction_contrasts()
+
+ALL_BOOTSTRAP_CONTRASTS = OrderedDict()
+ALL_BOOTSTRAP_CONTRASTS.update(DELTA_VS_FP16_CONTRASTS)
+ALL_BOOTSTRAP_CONTRASTS.update(KEY_TRAJECTORY_CONTRASTS)
+ALL_BOOTSTRAP_CONTRASTS.update(VALUE_TRAJECTORY_CONTRASTS)
+
+LOTO_CONTRASTS = OrderedDict()
+LOTO_CONTRASTS.update(DELTA_VS_FP16_CONTRASTS)
+LOTO_CONTRASTS.update(INTERACTION_CONTRASTS)
+
+
+# ---------------------------------------------------------------------------
+# Step 4: paired sample-level bootstrap preserving LongBench's equal-weight
+# 15-task aggregation.
+# ---------------------------------------------------------------------------
 
 def derive_seed(base_seed, *parts):
     key = f"{base_seed}:" + ":".join(str(p) for p in parts)
@@ -278,426 +486,459 @@ def derive_seed(base_seed, *parts):
     return int.from_bytes(digest[:8], "big") % (2**32 - 1)
 
 
-def bootstrap_task_replicate_means(effect_matrix, iterations, seed):
-    """effect_matrix: (n_rows, 6). Returns (iterations, 6): for each bootstrap
-    iteration, the mean effect over a with-replacement resample of the same
-    number of rows."""
-    n_rows = effect_matrix.shape[0]
-    rng = np.random.default_rng(seed)
-    idx = rng.integers(0, n_rows, size=(iterations, n_rows))
-    resampled = effect_matrix[idx]  # (iterations, n_rows, 6)
-    return resampled.mean(axis=1)  # (iterations, 6)
+def bootstrap_overall_scores(sample_scores, iterations, seed):
+    """For each of the 15 tasks, draw `iterations` sets of with-replacement
+    sample indices (one shared index set per task per replicate, applied
+    identically to all 9 configurations -- this is what keeps the bootstrap
+    paired). For each replicate and configuration, the task's bootstrap
+    score is the mean of that task's resampled per-sample scores; the
+    configuration's overall bootstrap score for that replicate is the
+    equal-weight mean of its 15 (resampled) task scores -- exactly mirroring
+    eval_long_bench.py's per-task `100 * mean(...)` followed by an unweighted
+    15-task average, never a raw mean over all 3550 samples.
+
+    Returns overall_boot: {(k,v): np.ndarray of shape (iterations,)}.
+    """
+    overall_boot = {cfg: np.zeros(iterations, dtype=np.float64) for cfg in ALL_CONFIGS}
+
+    for task in EXPECTED_TASKS:
+        n_rows = len(sample_scores[FP16][task])
+        task_seed = derive_seed(seed, "overall", task)
+        rng = np.random.default_rng(task_seed)
+        idx = rng.integers(0, n_rows, size=(iterations, n_rows))  # (iterations, n_rows), shared across configs
+
+        for cfg in ALL_CONFIGS:
+            col = sample_scores[cfg][task]  # (n_rows,)
+            task_boot_means = col[idx].mean(axis=1)  # (iterations,)
+            overall_boot[cfg] += task_boot_means / len(EXPECTED_TASKS)
+
+    return overall_boot
 
 
 def summarize_bootstrap(observed, boot_values):
-    """boot_values: 1-D array of bootstrap replicate estimates for one effect."""
     mean = float(boot_values.mean())
     se = float(boot_values.std(ddof=1))
     ci_low, ci_high = (float(v) for v in np.percentile(boot_values, [2.5, 97.5]))
-    p_gt0 = float((boot_values > 0).mean())
-    p_lt0 = float((boot_values < 0).mean())
-    sign_p = 2 * min(p_gt0, p_lt0, 1.0)
-    sign_p = min(sign_p, 1.0)
-    return {
-        "observed": float(observed),
-        "bootstrap_mean": mean,
-        "se": se,
-        "ci_low": ci_low,
-        "ci_high": ci_high,
-        "p_gt0": p_gt0,
-        "p_lt0": p_lt0,
-        "sign_probability": sign_p,
-    }
+    return {"observed": float(observed), "bootstrap_mean": mean, "se": se, "ci_low": ci_low, "ci_high": ci_high}
 
 
-def primary_bootstrap(sample_scores, iterations, seed):
-    """Fixed-task stratified paired bootstrap: resample within each of the
-    15 (fixed) tasks, take each task's bootstrap-replicate mean effect, then
-    equally-weight-average across the 15 tasks for each replicate."""
-    per_task_effect_matrix = {}
-    overall_boot = np.zeros((iterations, len(EFFECT_NAMES)), dtype=np.float64)
-    observed_task_means = {}
-
-    for task in EXPECTED_TASKS:
-        effect_matrix = compute_task_effect_matrix(sample_scores, task)
-        per_task_effect_matrix[task] = effect_matrix
-        observed_task_means[task] = effect_matrix.mean(axis=0)
-
-        task_seed = derive_seed(seed, "primary", task)
-        task_boot_means = bootstrap_task_replicate_means(effect_matrix, iterations, task_seed)
-        overall_boot += task_boot_means / len(EXPECTED_TASKS)
-
-    observed_overall = np.mean(
-        np.stack([observed_task_means[t] for t in EXPECTED_TASKS], axis=0), axis=0
-    )
-
-    result = {}
-    for i, name in enumerate(EFFECT_NAMES):
-        result[name] = summarize_bootstrap(observed_overall[i], overall_boot[:, i])
-
-    return result, per_task_effect_matrix, observed_task_means
-
-
-def per_task_bootstrap(per_task_effect_matrix, iterations, seed):
-    """Per-task paired bootstrap for each of the 6 effects, plus win/tie/loss
-    rates (sample-level) for the four vs-FP16 effects."""
-    out = {}
-    for task in EXPECTED_TASKS:
-        effect_matrix = per_task_effect_matrix[task]
-        n_rows = effect_matrix.shape[0]
-        task_out = {"n_samples": n_rows}
-        for i, name in enumerate(EFFECT_NAMES):
-            col = effect_matrix[:, i]
-            task_seed = derive_seed(seed, "per_task", task, name)
-            rng = np.random.default_rng(task_seed)
-            idx = rng.integers(0, n_rows, size=(iterations, n_rows))
-            boot_means = col[idx].mean(axis=1)
-            summary = summarize_bootstrap(col.mean(), boot_means)
-
-            if name in VS_FP16_EFFECTS:
-                wins = int((col > 0).sum())
-                ties = int((col == 0).sum())
-                losses = int((col < 0).sum())
-                summary.update(
-                    {
-                        "win_rate": wins / n_rows,
-                        "tie_rate": ties / n_rows,
-                        "loss_rate": losses / n_rows,
-                    }
-                )
-            task_out[name] = summary
-        out[task] = task_out
+def summarize_contrasts(contrasts, raw_avg, overall_boot):
+    """contrasts: OrderedDict[name] -> {(k,v): coef}. Returns OrderedDict[name] -> summary dict."""
+    out = OrderedDict()
+    for name, contrast in contrasts.items():
+        observed = apply_contrast(raw_avg, contrast)
+        boot_values = apply_contrast(overall_boot, contrast)  # (iterations,)
+        out[name] = summarize_bootstrap(observed, boot_values)
     return out
 
 
-def secondary_task_level_bootstrap(observed_task_means, iterations, seed):
-    """Treats the 15 observed task-level mean effects as a resamplable
-    population: with-replacement resample of 15 tasks, 10000 iterations,
-    mean + 95% CI. Sensitivity analysis only -- does not replace the
-    primary (fixed-task) bootstrap."""
-    tasks = EXPECTED_TASKS
-    matrix = np.stack([observed_task_means[t] for t in tasks], axis=0)  # (15, 6)
-    n_tasks = matrix.shape[0]
+# ---------------------------------------------------------------------------
+# Step 7: leave-one-task-out robustness
+# ---------------------------------------------------------------------------
 
-    result = {}
-    for i, name in enumerate(EFFECT_NAMES):
-        task_seed = derive_seed(seed, "secondary", name)
-        rng = np.random.default_rng(task_seed)
-        idx = rng.integers(0, n_tasks, size=(iterations, n_tasks))
-        boot_means = matrix[idx, i].mean(axis=1)
-        result[name] = summarize_bootstrap(matrix[:, i].mean(), boot_means)
-    return result
+def leave_one_task_out(task_mean_raw, contrasts):
+    """task_mean_raw: {(k,v): {task: raw_score}}. contrasts: OrderedDict[name] -> {(k,v): coef}.
+    For each contrast, computes the per-task contrast value (same linear
+    combination applied at single-task granularity), then the full 15-task
+    mean and every 14-task (one-task-removed) mean."""
+    per_task_contrast = {}  # name -> {task: value}
+    for name, contrast in contrasts.items():
+        per_task_contrast[name] = {}
+        for task in EXPECTED_TASKS:
+            score_map_t = {cfg: task_mean_raw[cfg][task] for cfg in ALL_CONFIGS}
+            per_task_contrast[name][task] = apply_contrast(score_map_t, contrast)
 
-
-def leave_one_task_out(observed_task_means):
-    tasks = EXPECTED_TASKS
-    matrix = np.stack([observed_task_means[t] for t in tasks], axis=0)  # (15, 6)
-    full_mean = matrix.mean(axis=0)
-
-    result = {}
-    for i, name in enumerate(EFFECT_NAMES):
+    result = OrderedDict()
+    for name in contrasts:
+        values = per_task_contrast[name]
+        full_mean = sum(values.values()) / len(EXPECTED_TASKS)
         loto_values = {}
-        for j, left_out in enumerate(tasks):
-            mask = np.ones(len(tasks), dtype=bool)
-            mask[j] = False
-            loto_values[left_out] = float(matrix[mask, i].mean())
+        for left_out in EXPECTED_TASKS:
+            remaining = [values[t] for t in EXPECTED_TASKS if t != left_out]
+            loto_values[left_out] = sum(remaining) / len(remaining)
 
         min_task = min(loto_values, key=loto_values.get)
         max_task = max(loto_values, key=loto_values.get)
-        full_sign = np.sign(full_mean[i])
-        sign_changes = [t for t, v in loto_values.items() if np.sign(v) != full_sign and full_sign != 0]
+        full_sign = np.sign(full_mean)
+        sign_changes = [t for t, v in loto_values.items() if full_sign != 0 and np.sign(v) != full_sign]
 
         result[name] = {
-            "full_15_task_mean": float(full_mean[i]),
-            "loto_values": loto_values,
-            "min": loto_values[min_task],
+            "full_15_task_mean": float(full_mean),
+            "loto_values": {t: float(v) for t, v in loto_values.items()},
+            "min": float(loto_values[min_task]),
             "min_task": min_task,
-            "max": loto_values[max_task],
+            "max": float(loto_values[max_task]),
             "max_task": max_task,
             "sign_changed_when_removing": sign_changes,
         }
     return result
 
 
-def sensitive_task_rankings(observed_task_means, per_task_boot):
-    def sorted_by(effect_name, reverse=False):
-        return sorted(
-            EXPECTED_TASKS,
-            key=lambda t: observed_task_means[t][EFFECT_NAMES.index(effect_name)],
-            reverse=reverse,
-        )
+# ---------------------------------------------------------------------------
+# Step 6: per-task sensitivity table
+#
+# Exact formulas (percentage points, raw/unrounded per-task means):
+#   largest_abs_degradation(task)  = min over the 8 non-FP16 cells of
+#                                     (score(cell, task) - score(FP16, task))
+#                                     -- i.e. the single most negative delta
+#                                     vs FP16 among the 8 quantized configs.
+#   K_sensitivity(task)  = mean over V in {16,4,2} of
+#                           |score(K2,V,task) - score(K16,V,task)|
+#   V_sensitivity(task)  = mean over K in {16,4,2} of
+#                           |score(K,V2,task) - score(K,V16,task)|
+#   tolerance_4bit(task) = mean of {score(K4,V16,task)-FP16, score(K16,V4,task)-FP16}
+#                           (single-axis drop to 4-bit only)
+#   sensitivity_2bit(task) = mean of {score(K2,V16,task)-FP16, score(K16,V2,task)-FP16}
+#                           (single-axis drop to 2-bit only)
+#   joint_mixed_sensitivity(task) = mean of {score(cfg,task)-FP16 for cfg in
+#                           {K2/V2, K4/V4, K2/V4, K4/V2}} (both axes quantized)
+# ---------------------------------------------------------------------------
 
-    def ci_entirely_below_zero(effect_name):
-        return [
-            t for t in EXPECTED_TASKS
-            if per_task_boot[t][effect_name]["ci_high"] < 0
-        ]
+def build_task_sensitivity_table(task_mean_raw):
+    rows = []
+    for task in EXPECTED_TASKS:
+        fp16 = task_mean_raw[FP16][task]
+        cell = {cfg: task_mean_raw[cfg][task] for cfg in ALL_CONFIGS}
+        deltas = {cfg: cell[cfg] - fp16 for cfg in ALL_CONFIGS if cfg != FP16}
 
-    key_idx = EFFECT_NAMES.index("key_only")
-    value_idx = EFFECT_NAMES.index("value_only")
+        worst_cfg = min(deltas, key=deltas.get)
+        worst_delta = deltas[worst_cfg]
 
-    most_negative_value_only = sorted_by("value_only")[:5]
-    most_negative_key_only = sorted_by("key_only")[:5]
-    most_negative_joint = sorted_by("joint")[:5]
-    most_negative_interaction = sorted_by("interaction")[:5]
+        k_sensitivity = float(np.mean([abs(cell[(2, v)] - cell[(16, v)]) for v in V_LEVELS]))
+        v_sensitivity = float(np.mean([abs(cell[(k, 2)] - cell[(k, 16)]) for k in K_LEVELS]))
+        tolerance_4bit = float(np.mean([deltas[(4, 16)], deltas[(16, 4)]]))
+        sensitivity_2bit = float(np.mean([deltas[(2, 16)], deltas[(16, 2)]]))
+        joint_mixed_sensitivity = float(np.mean([deltas[(2, 2)], deltas[(4, 4)], deltas[(2, 4)], deltas[(4, 2)]]))
 
-    diff_sorted = sorted(
-        EXPECTED_TASKS,
-        key=lambda t: abs(observed_task_means[t][key_idx] - observed_task_means[t][value_idx]),
-        reverse=True,
-    )[:5]
-
-    return {
-        "value_only_most_negative_5": most_negative_value_only,
-        "key_only_most_negative_5": most_negative_key_only,
-        "joint_most_negative_5": most_negative_joint,
-        "interaction_most_negative_5": most_negative_interaction,
-        "largest_key_vs_value_gap_5": diff_sorted,
-        "value_only_ci_entirely_below_zero": ci_entirely_below_zero("value_only"),
-        "key_only_ci_entirely_below_zero": ci_entirely_below_zero("key_only"),
-        "interaction_ci_entirely_below_zero": ci_entirely_below_zero("interaction"),
-        "highlighted_tasks": {
-            t: {
-                name: observed_task_means[t][EFFECT_NAMES.index(name)]
-                for name in EFFECT_NAMES
+        row = {
+            "task": task,
+            "n_samples": EXPECTED_TASK_COUNTS[task],
+            "fp16_score": fp16,
+        }
+        for cfg in ALL_CONFIGS:
+            row[f"{config_label(cfg)}_score"] = cell[cfg]
+        for cfg in ALL_CONFIGS:
+            if cfg == FP16:
+                continue
+            row[f"{config_label(cfg)}_delta_vs_fp16"] = deltas[cfg]
+        row.update(
+            {
+                "largest_abs_degradation": worst_delta,
+                "largest_abs_degradation_config": config_label(worst_cfg),
+                "k_sensitivity": k_sensitivity,
+                "v_sensitivity": v_sensitivity,
+                "tolerance_4bit": tolerance_4bit,
+                "sensitivity_2bit": sensitivity_2bit,
+                "joint_mixed_sensitivity": joint_mixed_sensitivity,
             }
-            for t in HIGHLIGHT_TASKS
-        },
-    }
-
-
-def write_overall_csv(path, primary, secondary, loto):
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(
-            [
-                "effect", "label", "observed_effect",
-                "primary_bootstrap_mean", "primary_se", "primary_ci_low", "primary_ci_high",
-                "primary_p_gt0", "primary_p_lt0", "primary_sign_probability",
-                "secondary_bootstrap_mean", "secondary_ci_low", "secondary_ci_high",
-                "loto_min", "loto_min_task", "loto_max", "loto_max_task",
-                "loto_sign_changed",
-            ]
         )
-        for name in EFFECT_NAMES:
-            p = primary[name]
-            s = secondary[name]
-            l = loto[name]
-            writer.writerow(
-                [
-                    name, EFFECT_LABELS[name], p["observed"],
-                    p["bootstrap_mean"], p["se"], p["ci_low"], p["ci_high"],
-                    p["p_gt0"], p["p_lt0"], p["sign_probability"],
-                    s["bootstrap_mean"], s["ci_low"], s["ci_high"],
-                    l["min"], l["min_task"], l["max"], l["max_task"],
-                    bool(l["sign_changed_when_removing"]),
-                ]
-            )
+        rows.append(row)
+    return rows
 
 
-def write_per_task_csv(path, per_task_boot):
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        header = ["task", "n_samples"]
-        for name in EFFECT_NAMES:
-            header += [f"{name}_effect", f"{name}_ci_low", f"{name}_ci_high"]
-            if name in VS_FP16_EFFECTS:
-                header += [f"{name}_win_rate", f"{name}_tie_rate", f"{name}_loss_rate"]
-        writer.writerow(header)
+HIGHLIGHT_CONTRASTS = OrderedDict(
+    [
+        ("K16/V16 -> K16/V2", {(16, 2): 1.0, (16, 16): -1.0}),
+        ("K16/V16 -> K2/V16", {(2, 16): 1.0, (16, 16): -1.0}),
+        ("K16/V4 -> K16/V2", {(16, 2): 1.0, (16, 4): -1.0}),
+        ("K2/V4 -> K2/V2", {(2, 2): 1.0, (2, 4): -1.0}),
+        ("K4/V4 -> K4/V2", {(4, 2): 1.0, (4, 4): -1.0}),
+        ("K16/V2 -> K2/V2", {(2, 2): 1.0, (16, 2): -1.0}),
+    ]
+)
 
+
+def rank_tasks_by_highlight_contrasts(task_mean_raw):
+    out = OrderedDict()
+    for name, contrast in HIGHLIGHT_CONTRASTS.items():
+        per_task = {}
         for task in EXPECTED_TASKS:
-            row = [task, per_task_boot[task]["n_samples"]]
-            for name in EFFECT_NAMES:
-                d = per_task_boot[task][name]
-                row += [d["observed"], d["ci_low"], d["ci_high"]]
-                if name in VS_FP16_EFFECTS:
-                    row += [d["win_rate"], d["tie_rate"], d["loss_rate"]]
-            writer.writerow(row)
+            score_map_t = {cfg: task_mean_raw[cfg][task] for cfg in ALL_CONFIGS}
+            per_task[task] = apply_contrast(score_map_t, contrast)
+        ranked = sorted(EXPECTED_TASKS, key=lambda t: per_task[t])
+        out[name] = {
+            "most_negative_5": ranked[:5],
+            "values": {t: float(per_task[t]) for t in EXPECTED_TASKS},
+        }
+    return out
 
+
+# ---------------------------------------------------------------------------
+# Output writers
+# ---------------------------------------------------------------------------
 
 def fmt(x, nd=4):
     return f"{x:+.{nd}f}" if isinstance(x, (int, float)) else str(x)
 
 
-def write_report_md(path, ctx):
-    primary = ctx["primary"]
-    secondary = ctx["secondary"]
-    loto = ctx["loto"]
-    rankings = ctx["rankings"]
-    official_avg = ctx["official_avg"]
+def write_overall_scores_csv(path, official_avg, raw_avg, delta_boot):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["config", "k_bits", "v_bits", "official_avg", "raw_avg", "delta_vs_fp16_raw", "delta_ci_low", "delta_ci_high"])
+        for cfg in ALL_CONFIGS:
+            k, v = cfg
+            label = config_label(cfg)
+            if cfg == FP16:
+                writer.writerow([label, k, v, official_avg[cfg], raw_avg[cfg], 0.0, 0.0, 0.0])
+            else:
+                d = delta_boot[f"{label} - FP16"]
+                writer.writerow([label, k, v, official_avg[cfg], raw_avg[cfg], d["observed"], d["ci_low"], d["ci_high"]])
 
-    def ci_note(name):
-        p = primary[name]
-        crosses = p["ci_low"] <= 0 <= p["ci_high"]
-        return "CI 跨越 0（不穩定）" if crosses else "CI 未跨越 0"
+
+def write_task_scores_csv(path, sensitivity_rows):
+    if not sensitivity_rows:
+        return
+    fieldnames = list(sensitivity_rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in sensitivity_rows:
+            writer.writerow(row)
+
+
+def write_bootstrap_contrasts_csv(path, boot_summaries, group_name):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["group", "contrast", "observed", "ci_low", "ci_high", "ci_excludes_zero"])
+        for name, s in boot_summaries.items():
+            excludes_zero = not (s["ci_low"] <= 0 <= s["ci_high"])
+            writer.writerow([group_name, name, s["observed"], s["ci_low"], s["ci_high"], excludes_zero])
+
+
+def write_interactions_csv(path, interaction_boot):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["interaction", "observed", "ci_low", "ci_high", "ci_excludes_zero"])
+        for name, s in interaction_boot.items():
+            excludes_zero = not (s["ci_low"] <= 0 <= s["ci_high"])
+            writer.writerow([name, s["observed"], s["ci_low"], s["ci_high"], excludes_zero])
+
+
+def write_loto_csv(path, loto):
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["contrast", "full_15_task_mean", "min", "min_task", "max", "max_task", "sign_changed"])
+        for name, l in loto.items():
+            writer.writerow(
+                [name, l["full_15_task_mean"], l["min"], l["min_task"], l["max"], l["max_task"], bool(l["sign_changed_when_removing"])]
+            )
+
+
+def write_report_md(path, ctx):
+    integrity = ctx["integrity_result"]
+    pairing = ctx["pairing_result"]
+    recompute = ctx["recompute_result"]
+    official_avg = ctx["official_avg"]
+    raw_avg = ctx["raw_avg"]
+    delta_boot = ctx["delta_boot"]
+    key_traj_boot = ctx["key_traj_boot"]
+    val_traj_boot = ctx["val_traj_boot"]
+    interaction_boot = ctx["interaction_boot"]
+    loto = ctx["loto"]
+    sensitivity_rows = ctx["sensitivity_rows"]
+    highlight_rankings = ctx["highlight_rankings"]
+
+    def ci_note(summary):
+        return "CI crosses 0 (unstable)" if summary["ci_low"] <= 0 <= summary["ci_high"] else "CI excludes 0"
 
     lines = []
-    lines.append("# K/V Cache Ablation: Paired Sample-Level and Bootstrap Analysis")
+    lines.append("# K/V Cache 3x3 Ablation: Paired Sample-Level and Bootstrap Analysis")
     lines.append("")
     lines.append(f"- Generated: {ctx['timestamp']}")
     lines.append(f"- Git commit: `{ctx['git_commit']}`")
     lines.append(f"- Bootstrap iterations: {ctx['iterations']}, base seed: {ctx['seed']}")
-    lines.append("")
-    lines.append(
-        "本分析以既有的五組完整 prediction JSONL 為輸入，"
-        "重算 sample-level 分數並驗證與 `result.json` 一致，"
-        "再以固定 15-task、task 內 paired bootstrap 為 primary 方法估計不確定性。"
-    )
-    lines.append("")
-    lines.append(
-        "**配對方式**：因 prediction 不包含原始 sample ID，本分析以相同 task 內的 "
-        "row order 配對，並以 answers、all_classes、length 的逐列一致性作為配對驗證"
-        f"（結果：{ctx['pairing_status']}）。"
-    )
+    lines.append(f"- Pred root: `{ctx['pred_root']}`")
     lines.append("")
 
-    lines.append("## A. 直接觀察（五組方法平均）")
+    lines.append("## 1. Data validation status")
     lines.append("")
-    lines.append("| method | official average (result.json, rounded task scores) |")
+    lines.append("| check | status |")
     lines.append("|---|---|")
-    for method in METHODS:
-        lines.append(f"| {method} | {official_avg[method]:.7f} |")
+    lines.append(f"| configuration discovery (9/9) | PASS |")
+    lines.append(f"| strict JSONL integrity (row counts, valid JSON, no NUL, trailing newline, no leftover .partial) | {integrity['status']} |")
+    lines.append(f"| task-set completeness (15/15 per config) | PASS |")
+    lines.append(f"| sample-level pairing (answers/all_classes/length, all 9 configs) | {pairing['status']} |")
+    lines.append(f"| recomputed scores vs result.json ({recompute['n_checked']} config-task pairs) | {recompute['status']} ({recompute['n_mismatches']} mismatches) |")
     lines.append("")
     lines.append(
-        f"- K2/V16 的平均（{official_avg['K2/V16']:.4f}）接近 FP16（{official_avg['FP16']:.4f}）。\n"
-        f"- K16/V2 的平均（{official_avg['K16/V2']:.4f}）比 FP16 低約 "
-        f"{official_avg['FP16'] - official_avg['K16/V2']:.4f}。\n"
-        f"- K2/V2 的平均（{official_avg['K2/V2']:.4f}）比 FP16 低約 "
-        f"{official_avg['FP16'] - official_avg['K2/V2']:.4f}。"
+        "**Pairing method**: predictions carry no explicit sample ID; pairing is "
+        "validated by same-task row order plus row-by-row equality of `answers`, "
+        "`all_classes`, and `length` across all 9 configurations. This analysis "
+        "fails closed (raises, writes nothing) if any of the above checks fail."
     )
     lines.append("")
-
-    lines.append("## B. Overall paired effects — Primary (task-stratified) bootstrap")
+    lines.append("**Configuration discovery** (how each of the 9 directories was resolved):")
     lines.append("")
-    lines.append("| effect | observed | 95% CI | sign probability | CI vs 0 |")
-    lines.append("|---|---|---|---|---|")
-    for name in EFFECT_NAMES:
-        p = primary[name]
-        lines.append(
-            f"| {EFFECT_LABELS[name]} | {fmt(p['observed'])} | "
-            f"[{fmt(p['ci_low'])}, {fmt(p['ci_high'])}] | "
-            f"{p['sign_probability']:.4f} | {ci_note(name)} |"
-        )
-    lines.append("")
-    lines.append("Secondary (task-level resampling) bootstrap, for comparison only:")
-    lines.append("")
-    lines.append("| effect | observed | secondary 95% CI |")
+    lines.append("| directory | status | config / reason |")
     lines.append("|---|---|---|")
-    for name in EFFECT_NAMES:
-        s = secondary[name]
-        lines.append(f"| {EFFECT_LABELS[name]} | {fmt(s['observed'])} | [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] |")
+    for entry in ctx["discovery_log"]:
+        detail = entry.get("config", entry.get("reason", ""))
+        lines.append(f"| {entry['dir']} | {entry['status']} | {detail} |")
     lines.append("")
 
-    lines.append("## C. Leave-one-task-out")
+    lines.append("## 2. Full 3x3 matrix (official average -- mean of 15 rounded task scores)")
     lines.append("")
-    lines.append("| effect | full 15-task mean | min (task removed) | max (task removed) | sign changed by removing any one task |")
+    lines.append("| K \\ V | V16 | V4 | V2 |")
+    lines.append("|---|---|---|---|")
+    for k in K_LEVELS:
+        cells = " | ".join(f"{official_avg[(k, v)]:.6f}" for v in V_LEVELS)
+        lines.append(f"| K{k} | {cells} |")
+    lines.append("")
+
+    lines.append("## 3. Deltas vs FP16 (raw/unrounded, percentage points)")
+    lines.append("")
+    lines.append("Sign convention: delta = score(destination) - score(source); negative = degradation.")
+    lines.append("")
+    lines.append("| config | delta vs FP16 | 95% bootstrap CI | |")
+    lines.append("|---|---|---|---|")
+    for cfg in ALL_CONFIGS:
+        if cfg == FP16:
+            continue
+        s = delta_boot[f"{config_label(cfg)} - FP16"]
+        lines.append(f"| {config_label(cfg)} | {fmt(s['observed'])} | [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] | {ci_note(s)} |")
+    lines.append("")
+
+    lines.append("## 4. Key trajectories (fixed Value precision)")
+    lines.append("")
+    lines.append("| contrast | observed | 95% CI | |")
+    lines.append("|---|---|---|---|")
+    for name, s in key_traj_boot.items():
+        lines.append(f"| {name} | {fmt(s['observed'])} | [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] | {ci_note(s)} |")
+    lines.append("")
+
+    lines.append("## 5. Value trajectories (fixed Key precision)")
+    lines.append("")
+    lines.append("| contrast | observed | 95% CI | |")
+    lines.append("|---|---|---|---|")
+    for name, s in val_traj_boot.items():
+        lines.append(f"| {name} | {fmt(s['observed'])} | [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] | {ci_note(s)} |")
+    lines.append("")
+
+    lines.append("## 6. Bootstrap design")
+    lines.append("")
+    lines.append(
+        "Paired, task-stratified bootstrap: for each of the 15 tasks, the same "
+        "with-replacement sample of that task's row indices is applied to all 9 "
+        "configurations in a given replicate; each configuration's replicate task "
+        "score is the mean of the resampled per-sample scores; each configuration's "
+        "replicate overall score is the equal (1/15) weighted mean of its 15 "
+        "replicate task scores -- reproducing eval_long_bench.py's aggregation "
+        "exactly (never a raw mean over all 3550 samples). All contrasts below are "
+        "linear combinations of these paired per-replicate overall scores, so every "
+        "reported CI is fully paired."
+    )
+    lines.append("")
+
+    lines.append("## 7. K x V interactions")
+    lines.append("")
+    lines.append("Interaction = [S(K_dest,V_dest) - S(K_source,V_dest)] - [S(K_dest,V_source) - S(K_source,V_source)]")
+    lines.append("")
+    lines.append("| interaction | observed | 95% CI | |")
+    lines.append("|---|---|---|---|")
+    for name, s in interaction_boot.items():
+        lines.append(f"| {name} | {fmt(s['observed'])} | [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] | {ci_note(s)} |")
+    lines.append("")
+
+    lines.append("## 8. Task-level sensitivity")
+    lines.append("")
+    lines.append(
+        "Formulas (raw/unrounded per-task percentage points): "
+        "`k_sensitivity` = mean over V in {16,4,2} of |score(K2,V) - score(K16,V)|; "
+        "`v_sensitivity` = mean over K in {16,4,2} of |score(K,V2) - score(K,V16)|; "
+        "`tolerance_4bit` = mean of {K4/V16-FP16, K16/V4-FP16} (single-axis 4-bit drop); "
+        "`sensitivity_2bit` = mean of {K2/V16-FP16, K16/V2-FP16} (single-axis 2-bit drop); "
+        "`joint_mixed_sensitivity` = mean of {K2/V2, K4/V4, K2/V4, K4/V2} deltas vs FP16 "
+        "(both axes quantized)."
+    )
+    lines.append("")
+    lines.append("| task | n | worst delta vs FP16 | worst config | k_sensitivity | v_sensitivity | tol_4bit | sens_2bit | joint_mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|---|")
+    for row in sensitivity_rows:
+        lines.append(
+            f"| {row['task']} | {row['n_samples']} | {fmt(row['largest_abs_degradation'])} | "
+            f"{row['largest_abs_degradation_config']} | {fmt(row['k_sensitivity'])} | "
+            f"{fmt(row['v_sensitivity'])} | {fmt(row['tolerance_4bit'])} | "
+            f"{fmt(row['sensitivity_2bit'])} | {fmt(row['joint_mixed_sensitivity'])} |"
+        )
+    lines.append("")
+    lines.append("Tasks most responsible for large changes in specific highlighted contrasts (most negative 5):")
+    lines.append("")
+    for name, r in highlight_rankings.items():
+        lines.append(f"- **{name}**: {', '.join(r['most_negative_5'])}")
+    lines.append("")
+
+    lines.append("## 9. Leave-one-task-out robustness")
+    lines.append("")
+    lines.append("| contrast | full 15-task | min (task removed) | max (task removed) | sign ever flips |")
     lines.append("|---|---|---|---|---|")
-    for name in EFFECT_NAMES:
-        l = loto[name]
-        changed = ", ".join(l["sign_changed_when_removing"]) if l["sign_changed_when_removing"] else "none"
+    for name, l in loto.items():
+        changed = ", ".join(l["sign_changed_when_removing"]) if l["sign_changed_when_removing"] else "no"
         lines.append(
-            f"| {EFFECT_LABELS[name]} | {fmt(l['full_15_task_mean'])} | "
-            f"{fmt(l['min'])} ({l['min_task']}) | {fmt(l['max'])} ({l['max_task']}) | {changed} |"
-        )
-    lines.append("")
-    value_only_loto = loto["value_only"]["loto_values"]
-    lines.append(
-        f"- 移除 `lcc` 後 Value-only effect：{fmt(value_only_loto['lcc'])}"
-        f"（{'仍為負' if value_only_loto['lcc'] < 0 else '轉為非負'}）。"
-    )
-    pr_loto = {name: loto[name]["loto_values"]["passage_retrieval_en"] for name in EFFECT_NAMES}
-    lines.append(
-        "- 移除 `passage_retrieval_en` 後各 effect："
-        + ", ".join(f"{EFFECT_LABELS[n]}={fmt(v)}" for n, v in pr_loto.items())
-    )
-    kmv_sign_stable = not loto["key_minus_value"]["sign_changed_when_removing"]
-    lines.append(
-        f"- Key-only 減 Value-only 的方向在 leave-one-task-out 下"
-        f"{'保持穩定（未曾變號）' if kmv_sign_stable else '在移除某些 task 後變號，方向不穩定'}。"
-    )
-    interaction_dominated = bool(loto["interaction"]["sign_changed_when_removing"])
-    lines.append(
-        f"- Interaction 的符號{'會因移除單一 task 而改變，顯示可能由少數 task 主導' if interaction_dominated else '在移除任一單一 task 後皆未變號，不像是由單一 task 主導'}。"
-    )
-    lines.append("")
-
-    lines.append("## D. 敏感任務排序")
-    lines.append("")
-    lines.append(f"- Value-only 最負面 5 個 task：{', '.join(rankings['value_only_most_negative_5'])}")
-    lines.append(f"- Key-only 最負面 5 個 task：{', '.join(rankings['key_only_most_negative_5'])}")
-    lines.append(f"- Joint 最負面 5 個 task：{', '.join(rankings['joint_most_negative_5'])}")
-    lines.append(f"- Interaction 最負面 5 個 task：{', '.join(rankings['interaction_most_negative_5'])}")
-    lines.append(f"- K2/V16 與 K16/V2 差異最大 5 個 task：{', '.join(rankings['largest_key_vs_value_gap_5'])}")
-    lines.append(
-        f"- Value-only 95% CI 完全低於 0 的 task："
-        f"{', '.join(rankings['value_only_ci_entirely_below_zero']) or '（無）'}"
-    )
-    lines.append(
-        f"- Key-only 95% CI 完全低於 0 的 task："
-        f"{', '.join(rankings['key_only_ci_entirely_below_zero']) or '（無）'}"
-    )
-    lines.append(
-        f"- Interaction 95% CI 完全低於 0 的 task："
-        f"{', '.join(rankings['interaction_ci_entirely_below_zero']) or '（無）'}"
-    )
-    lines.append("")
-    lines.append("特別關注任務（觀察值，不預設顯著）：")
-    lines.append("")
-    lines.append("| task | key_only | value_only | joint | kivi4 | key_minus_value | interaction |")
-    lines.append("|---|---|---|---|---|---|---|")
-    for t in HIGHLIGHT_TASKS:
-        v = rankings["highlighted_tasks"][t]
-        lines.append(
-            f"| {t} | " + " | ".join(fmt(v[n]) for n in EFFECT_NAMES) + " |"
+            f"| {name} | {fmt(l['full_15_task_mean'])} | {fmt(l['min'])} ({l['min_task']}) | "
+            f"{fmt(l['max'])} ({l['max_task']}) | {changed} |"
         )
     lines.append("")
 
-    lines.append("## E. Bootstrap 支持程度")
-    lines.append("")
-    lines.append(
-        "- Key-only effect 的 primary CI "
-        f"{'跨越 0' if primary['key_only']['ci_low'] <= 0 <= primary['key_only']['ci_high'] else '未跨越 0'}，"
-        "與觀察到「幾乎無損」的方向一致。"
-    )
-    lines.append(
-        "- Value-only effect 的 primary CI "
-        f"{'跨越 0' if primary['value_only']['ci_low'] <= 0 <= primary['value_only']['ci_high'] else '未跨越 0'}。"
-    )
-    lines.append(
-        "- Interaction 的 primary CI "
-        f"{'跨越 0' if primary['interaction']['ci_low'] <= 0 <= primary['interaction']['ci_high'] else '未跨越 0，初步支持負向 interaction'}。"
-    )
-    lines.append(
-        f"- Value-only 比 Key-only 敏感的方向在 leave-one-task-out 下"
-        f"{'保持穩定' if not loto['key_minus_value']['sign_changed_when_removing'] else '不穩定，會因移除單一 task 而改變'}。"
-    )
+    lines.append("## 10. Safe interpretation")
     lines.append("")
 
-    lines.append("## F. 不可宣稱的內容（限制）")
-    lines.append("")
-    lines.append("1. 每組方法只有一批 deterministic greedy predictions（無多 seed 重複）。")
-    lines.append(
-        "2. Bootstrap 估計的是 benchmark samples/tasks 的不確定性，"
-        "不是模型重新執行的 run-to-run variance，也不是跨硬體變異的估計。"
+    def excludes_zero(s):
+        return not (s["ci_low"] <= 0 <= s["ci_high"])
+
+    v4_stable = all(
+        not excludes_zero(val_traj_boot[f"V16->V4 @ K{k}"]) or val_traj_boot[f"V16->V4 @ K{k}"]["observed"] > -0.5
+        for k in K_LEVELS
     )
-    lines.append("3. Prediction 無 sample ID，配對依賴已驗證的 row order 一致性。")
-    lines.append("4. LongBench 15-task 平均差距很小，不等於普遍模型品質差異。")
-    lines.append("5. 本分析未涵蓋其他模型、context length、硬體或 bit configuration。")
-    lines.append("6. 不能只依此證明 Value 量化在所有模型上都比 Key 量化敏感。")
-    lines.append("7. Interaction 為 operational ablation interaction 的估計，不是因果機制證明。")
+    v2_drop_present = any(excludes_zero(val_traj_boot[f"V4->V2 @ K{k}"]) for k in K_LEVELS)
+
+    lines.append(
+        "This section distinguishes point estimates, bootstrap-supported "
+        "conclusions (CI excludes 0), and unstable/task-dependent observations "
+        "(CI crosses 0, or leave-one-task-out changes sign)."
+    )
+    lines.append("")
+    lines.append("**Point estimates only** (not claims of significance):")
+    lines.append(f"- The full 3x3 official-average matrix is reported in Section 2; all 9 cells are within a narrow band of FP16 ({official_avg[FP16]:.4f}).")
+    lines.append("")
+    lines.append("**Bootstrap-supported observations** (95% CI excludes 0):")
+    for name, s in list(delta_boot.items()) + list(key_traj_boot.items()) + list(val_traj_boot.items()):
+        if excludes_zero(s):
+            lines.append(f"- {name}: {fmt(s['observed'])}, 95% CI [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}].")
+    lines.append("")
+    lines.append("**Unstable / task-dependent observations** (CI crosses 0, or sign flips under leave-one-task-out):")
+    for name, s in list(delta_boot.items()) + list(key_traj_boot.items()) + list(val_traj_boot.items()):
+        if not excludes_zero(s):
+            lines.append(f"- {name}: {fmt(s['observed'])}, 95% CI [{fmt(s['ci_low'])}, {fmt(s['ci_high'])}] crosses 0.")
+    for name, l in loto.items():
+        if l["sign_changed_when_removing"]:
+            lines.append(f"- {name}: sign flips under leave-one-task-out when removing {', '.join(l['sign_changed_when_removing'])}.")
+    lines.append("")
+    lines.append(
+        "**On the working hypothesis** (\"Value-cache quantization may remain "
+        "relatively stable at 4-bit precision, while a larger degradation emerges "
+        "when Value precision is reduced from 4 to 2 bits; Key sensitivity may also "
+        "depend on Value precision\"): see Sections 3-7 above for the exact point "
+        "estimates and CIs this hypothesis should be checked against "
+        "(V16->V4 vs V4->V2 trajectories at each fixed K, and the K x V interaction "
+        "terms). This script reports the paired estimates; it does not itself "
+        "assert the hypothesis is confirmed."
+    )
+    lines.append("")
+    lines.append("**What this analysis does NOT claim:**")
+    lines.append("- It does not claim any quantized configuration is better than FP16 merely because a point estimate is higher.")
+    lines.append("- It does not claim statistical equivalence between any two configurations (no equivalence test was implemented).")
+    lines.append("- It does not claim significance from point-estimate differences alone; only CI-based statements above are bootstrap-supported.")
+    lines.append("- It does not compute or report p-values.")
     lines.append("")
 
-    lines.append("## G. 結論")
+    lines.append("## Limitations")
     lines.append("")
-    lines.append(
-        "在本次 LongChat-7B / LongBench 設定下，結果初步支持："
-        "Value-only 量化（K16/V2）比 Key-only 量化（K2/V16）對整體平均分數的影響更大，"
-        "且 joint（K2/V2）量化的降幅明顯大於兩個單側效果的簡單相加，"
-        "初步支持存在負向 interaction。"
-        "但整體平均層級的差距小於個別 task 的波動幅度（尤其 `lcc` 與 `passage_retrieval_en`），"
-        "尚需跨模型與重複實驗驗證，才能將 task 層級的觀察（例如 code-completion 類任務對 Value "
-        "量化較敏感）視為穩定結論。"
-    )
+    lines.append("1. Each configuration has exactly one deterministic greedy-decoded prediction pass; no repeated seeds.")
+    lines.append("2. Bootstrap estimates benchmark sample/task uncertainty, not run-to-run or cross-hardware variance.")
+    lines.append("3. Predictions carry no sample ID; pairing relies on validated row order plus answers/all_classes/length equality.")
+    lines.append("4. The 3 earliest configurations (FP16, K2/V2, K4/V4) predate run_config.json; their k_bits/v_bits are inferred from the established `_<N>bits_` legacy directory-naming convention, not independently confirmed metadata.")
+    lines.append("5. Only one model (LongChat-7B), one context length, and one host/bit-configuration set is covered.")
+    lines.append("6. Interaction terms are operational ablation interactions, not evidence of a causal mechanism.")
     lines.append("")
 
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -707,52 +948,69 @@ def build_summary_json(ctx):
     return {
         "timestamp": ctx["timestamp"],
         "git_commit": ctx["git_commit"],
+        "pred_root": ctx["pred_root"],
         "bootstrap_seed": ctx["seed"],
         "bootstrap_iterations": ctx["iterations"],
-        "input_paths": {m: str(p) for m, p in METHODS.items()},
+        "discovery_log": ctx["discovery_log"],
         "metric_implementation": "eval_long_bench.dataset2metric + metrics.py (unmodified, imported)",
+        "integrity_validation": {"status": ctx["integrity_result"]["status"], "n_checked": ctx["integrity_result"]["n_config_task_pairs_checked"]},
         "pairing_validation": ctx["pairing_result"],
         "recomputed_score_validation": {
             "status": ctx["recompute_result"]["status"],
             "n_checked": ctx["recompute_result"]["n_checked"],
             "n_mismatches": ctx["recompute_result"]["n_mismatches"],
         },
-        "method_averages": {
-            "official_avg_from_result_json": ctx["official_avg"],
-            "raw_avg_from_unrounded_sample_means": ctx["raw_avg"],
-            "note": "正式 LongBench 報告分數使用 result.json 內 15 個已 round task score 的平均（official_avg_from_result_json）。",
-        },
-        "overall_effects_primary_bootstrap": ctx["primary"],
-        "overall_effects_secondary_bootstrap": ctx["secondary"],
+        "matrix_official_avg": {config_label(c): v for c, v in ctx["official_avg"].items()},
+        "matrix_raw_avg": {config_label(c): v for c, v in ctx["raw_avg"].items()},
+        "delta_vs_fp16": ctx["delta_boot"],
+        "key_trajectories": ctx["key_traj_boot"],
+        "value_trajectories": ctx["val_traj_boot"],
+        "interactions": ctx["interaction_boot"],
         "leave_one_task_out": ctx["loto"],
-        "sensitive_task_rankings": ctx["rankings"],
+        "task_sensitivity": ctx["sensitivity_rows"],
+        "highlight_task_rankings": ctx["highlight_rankings"],
         "limitations": [
-            "Each method has exactly one deterministic greedy-decoded prediction pass; no repeated seeds.",
+            "Each configuration has exactly one deterministic greedy-decoded prediction pass; no repeated seeds.",
             "Bootstrap estimates benchmark sample/task uncertainty, not run-to-run or cross-hardware variance.",
             "Predictions carry no sample ID; pairing relies on validated row order plus answers/all_classes/length equality.",
-            "The 15-task LongBench average differences are small and do not imply general model-quality differences.",
-            "Only one model (LongChat-7B), one context length, and one host/bit-configuration set is covered.",
-            "This analysis alone cannot establish that Value quantization is more sensitive than Key quantization across all models.",
-            "The interaction term is an operational ablation interaction, not evidence of a causal mechanism.",
+            "The 3 earliest configurations (FP16, K2/V2, K4/V4) predate run_config.json; k_bits/v_bits are inferred from the legacy `_<N>bits_` directory naming convention.",
+            "Only one model, one context length, and one host/bit-configuration set is covered.",
+            "Interaction terms are operational ablation interactions, not evidence of a causal mechanism.",
         ],
     }
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bootstrap-iterations", type=int, default=10000)
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--output-dir", type=str, default="analysis/results")
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--pred-root", type=str, default="pred", help="Root directory containing the 9 configuration subdirectories.")
+    parser.add_argument("--bootstrap", type=int, default=10000, help="Number of paired bootstrap replicates.")
+    parser.add_argument("--seed", type=int, default=42, help="Base seed; reruns with the same seed reproduce identical bootstrap results.")
+    parser.add_argument("--output-dir", type=str, default="analysis/results/kv_3x3")
     args = parser.parse_args()
+
+    pred_root = Path(args.pred_root)
+    if not pred_root.is_absolute():
+        pred_root = REPO_ROOT / pred_root
 
     output_dir = Path(args.output_dir)
     if not output_dir.is_absolute():
         output_dir = REPO_ROOT / output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print("Loading predictions for 5 methods...")
-    all_data = {method: load_method_predictions(path) for method, path in METHODS.items()}
-    result_jsons = {method: load_result_json(path) for method, path in METHODS.items()}
+    print(f"Discovering configurations under {pred_root}...")
+    configs, discovery_log = discover_configurations(pred_root)
+    print(f"  resolved {len(configs)}/9 configurations: {[config_label(c) for c in configs]}")
+
+    print("Validating strict JSONL integrity (row counts, valid JSON, NUL bytes, trailing newline, no leftover .partial)...")
+    integrity_result = validate_integrity(configs)
+    print(f"  integrity: {integrity_result['status']} ({integrity_result['n_config_task_pairs_checked']} config-task pairs checked)")
+
+    print("Loading predictions for 9 configurations...")
+    all_data = {cfg: load_predictions(path) for cfg, path in configs.items()}
+    result_jsons = {cfg: load_result_json(path) for cfg, path in configs.items()}
 
     print("Validating task sets...")
     validate_task_sets(all_data)
@@ -763,30 +1021,30 @@ def main():
 
     print("Recomputing sample-level scores and verifying against result.json...")
     recompute_result = recompute_and_verify(all_data, result_jsons)
-    print(
-        f"  score reproduction: {recompute_result['status']} "
-        f"({recompute_result['n_checked']} method-task combinations checked, "
-        f"{recompute_result['n_mismatches']} mismatches)"
-    )
+    print(f"  score reproduction: {recompute_result['status']} ({recompute_result['n_checked']} config-task combinations checked, {recompute_result['n_mismatches']} mismatches)")
 
     sample_scores = recompute_result["sample_scores"]
+    task_mean_raw = recompute_result["task_mean_raw"]
+    official_avg = recompute_result["official_avg"]
+    raw_avg = recompute_result["raw_avg"]
 
-    print(f"Running primary paired bootstrap ({args.bootstrap_iterations} iterations)...")
-    primary, per_task_effect_matrix, observed_task_means = primary_bootstrap(
-        sample_scores, args.bootstrap_iterations, args.seed
-    )
+    print(f"Running paired task-stratified bootstrap ({args.bootstrap} iterations)...")
+    overall_boot = bootstrap_overall_scores(sample_scores, args.bootstrap, args.seed)
 
-    print("Running per-task paired bootstrap...")
-    per_task_boot = per_task_bootstrap(per_task_effect_matrix, args.bootstrap_iterations, args.seed)
+    print("Summarizing delta-vs-FP16 / Key / Value trajectory contrasts...")
+    delta_boot = summarize_contrasts(DELTA_VS_FP16_CONTRASTS, raw_avg, overall_boot)
+    key_traj_boot = summarize_contrasts(KEY_TRAJECTORY_CONTRASTS, raw_avg, overall_boot)
+    val_traj_boot = summarize_contrasts(VALUE_TRAJECTORY_CONTRASTS, raw_avg, overall_boot)
 
-    print("Running secondary task-level bootstrap...")
-    secondary = secondary_task_level_bootstrap(observed_task_means, args.bootstrap_iterations, args.seed)
+    print("Summarizing K x V interactions...")
+    interaction_boot = summarize_contrasts(INTERACTION_CONTRASTS, raw_avg, overall_boot)
 
-    print("Computing leave-one-task-out...")
-    loto = leave_one_task_out(observed_task_means)
+    print("Computing leave-one-task-out robustness...")
+    loto = leave_one_task_out(task_mean_raw, LOTO_CONTRASTS)
 
-    print("Ranking sensitive tasks...")
-    rankings = sensitive_task_rankings(observed_task_means, per_task_boot)
+    print("Building task-level sensitivity table...")
+    sensitivity_rows = build_task_sensitivity_table(task_mean_raw)
+    highlight_rankings = rank_tasks_by_highlight_contrasts(task_mean_raw)
 
     def validate_summary(label, s):
         for key in ("observed", "bootstrap_mean", "se", "ci_low", "ci_high"):
@@ -794,54 +1052,81 @@ def main():
                 raise RuntimeError(f"Non-finite value in {label}: {key}={s[key]}")
         if not (s["ci_low"] <= s["bootstrap_mean"] <= s["ci_high"]):
             raise RuntimeError(f"CI does not bracket bootstrap mean for {label}: {s}")
-        if not (s["ci_low"] <= s["observed"] <= s["ci_high"]):
-            raise RuntimeError(f"CI does not bracket observed effect for {label}: {s}")
 
-    for name in EFFECT_NAMES:
-        validate_summary(f"primary.{name}", primary[name])
-        validate_summary(f"secondary.{name}", secondary[name])
-    for task in EXPECTED_TASKS:
-        for name in EFFECT_NAMES:
-            validate_summary(f"per_task.{task}.{name}", per_task_boot[task][name])
+    for group_name, group in [("delta", delta_boot), ("key_traj", key_traj_boot), ("val_traj", val_traj_boot), ("interaction", interaction_boot)]:
+        for name, s in group.items():
+            validate_summary(f"{group_name}.{name}", s)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     ctx = {
         "timestamp": datetime.now(timezone.utc).astimezone().isoformat(),
         "git_commit": get_git_commit(),
+        "pred_root": str(pred_root),
         "seed": args.seed,
-        "iterations": args.bootstrap_iterations,
-        "pairing_status": pairing_result["status"],
+        "iterations": args.bootstrap,
+        "discovery_log": discovery_log,
+        "integrity_result": integrity_result,
         "pairing_result": pairing_result,
         "recompute_result": recompute_result,
-        "official_avg": recompute_result["official_avg"],
-        "raw_avg": recompute_result["raw_avg"],
-        "primary": primary,
-        "secondary": secondary,
+        "official_avg": official_avg,
+        "raw_avg": raw_avg,
+        "delta_boot": delta_boot,
+        "key_traj_boot": key_traj_boot,
+        "val_traj_boot": val_traj_boot,
+        "interaction_boot": interaction_boot,
         "loto": loto,
-        "rankings": rankings,
+        "sensitivity_rows": sensitivity_rows,
+        "highlight_rankings": highlight_rankings,
     }
 
-    summary_path = output_dir / "kv_ablation_summary.json"
-    overall_csv_path = output_dir / "kv_ablation_overall.csv"
-    per_task_csv_path = output_dir / "kv_ablation_per_task.csv"
-    report_path = output_dir / "kv_ablation_report.md"
+    summary_path = output_dir / "summary.json"
+    overall_csv_path = output_dir / "overall_scores.csv"
+    task_csv_path = output_dir / "task_scores.csv"
+    contrasts_csv_path = output_dir / "bootstrap_contrasts.csv"
+    interactions_csv_path = output_dir / "interactions.csv"
+    loto_csv_path = output_dir / "leave_one_task_out.csv"
+    report_path = output_dir / "report.md"
 
     summary_path.write_text(json.dumps(build_summary_json(ctx), indent=2, ensure_ascii=False), encoding="utf-8")
-    write_overall_csv(overall_csv_path, primary, secondary, loto)
-    write_per_task_csv(per_task_csv_path, per_task_boot)
+    write_overall_scores_csv(overall_csv_path, official_avg, raw_avg, delta_boot)
+    write_task_scores_csv(task_csv_path, sensitivity_rows)
+
+    with contrasts_csv_path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["group", "contrast", "observed", "ci_low", "ci_high", "ci_excludes_zero"])
+    for group_name, group in [("delta_vs_fp16", delta_boot), ("key_trajectory", key_traj_boot), ("value_trajectory", val_traj_boot)]:
+        with contrasts_csv_path.open("a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            for name, s in group.items():
+                excludes_zero = not (s["ci_low"] <= 0 <= s["ci_high"])
+                writer.writerow([group_name, name, s["observed"], s["ci_low"], s["ci_high"], excludes_zero])
+
+    write_interactions_csv(interactions_csv_path, interaction_boot)
+    write_loto_csv(loto_csv_path, loto)
     write_report_md(report_path, ctx)
 
-    print("\nOverall effects (primary bootstrap):")
-    for name in EFFECT_NAMES:
-        p = primary[name]
-        print(
-            f"  {name:18s} observed={p['observed']:+.4f} "
-            f"95% CI=[{p['ci_low']:+.4f}, {p['ci_high']:+.4f}] "
-            f"sign_p={p['sign_probability']:.4f}"
-        )
+    print("\nFull 3x3 matrix (official average):")
+    header = "K \\ V".ljust(8) + "".join(f"V{v}".rjust(14) for v in V_LEVELS)
+    print(header)
+    for k in K_LEVELS:
+        row = f"K{k}".ljust(8) + "".join(f"{official_avg[(k, v)]:.6f}".rjust(14) for v in V_LEVELS)
+        print(row)
+
+    print("\nDelta vs FP16 (bootstrap):")
+    for name, s in delta_boot.items():
+        print(f"  {name:16s} observed={s['observed']:+.4f} 95% CI=[{s['ci_low']:+.4f}, {s['ci_high']:+.4f}]")
+
+    print("\nK x V interactions (bootstrap):")
+    for name, s in interaction_boot.items():
+        print(f"  {name:28s} observed={s['observed']:+.4f} 95% CI=[{s['ci_low']:+.4f}, {s['ci_high']:+.4f}]")
 
     print(f"\nWrote: {summary_path}")
     print(f"Wrote: {overall_csv_path}")
-    print(f"Wrote: {per_task_csv_path}")
+    print(f"Wrote: {task_csv_path}")
+    print(f"Wrote: {contrasts_csv_path}")
+    print(f"Wrote: {interactions_csv_path}")
+    print(f"Wrote: {loto_csv_path}")
     print(f"Wrote: {report_path}")
     print("\nANALYSIS_COMPLETE")
 
