@@ -163,3 +163,17 @@ def output_dir_name(condition):
 
 def total_example_count(task_counts=PILOT_TASK_COUNTS, num_conditions=16):
     return num_conditions * sum(task_counts.values())
+
+
+def select_task_counts(task_names, all_task_counts=PILOT_TASK_COUNTS):
+    """Validates a requested task-name subset (e.g. from --tasks) against
+    the full pilot task set and returns an OrderedDict restricted to those
+    tasks, in the canonical PILOT_TASK_COUNTS order (not the caller's
+    argument order, so downstream iteration/printing stays deterministic).
+    Fails closed on any unrecognized task name."""
+    unknown = [t for t in task_names if t not in all_task_counts]
+    if unknown:
+        raise PilotPolicyError(
+            f"Unknown task(s) {unknown}; must be a subset of {list(all_task_counts)}"
+        )
+    return OrderedDict((t, all_task_counts[t]) for t in all_task_counts if t in set(task_names))

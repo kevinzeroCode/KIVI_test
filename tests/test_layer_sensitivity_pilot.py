@@ -27,6 +27,7 @@ from utils.pilot_policy import (  # noqa: E402
     all_pilot_specs,
     discover_and_validate_pilot_policies,
     output_dir_name,
+    select_task_counts,
     total_example_count,
     write_pilot_policies,
 )
@@ -161,6 +162,69 @@ class TestTaskCountsAndTotals(unittest.TestCase):
 
     def test_dataset_evaluations_is_64(self):
         self.assertEqual(len(all_pilot_specs()) * len(PILOT_TASK_COUNTS), 64)
+
+
+# --- --tasks actually restricts generation (Stage D1 regression: --tasks was
+# parsed by argparse but silently ignored by both run_condition() and the
+# dry-run/manifest reporting, which always used the full 4-task set) --------
+
+class TestTasksFlagIsRespected(unittest.TestCase):
+    def test_select_task_counts_restricts_to_requested_subset(self):
+        result = select_task_counts(["trec"])
+        self.assertEqual(dict(result), {"trec": 200})
+
+    def test_select_task_counts_preserves_canonical_order_not_arg_order(self):
+        # Requested out of order; result must follow PILOT_TASK_COUNTS order.
+        result = select_task_counts(["2wikimqa", "trec"])
+        self.assertEqual(list(result), ["trec", "2wikimqa"])
+
+    def test_select_task_counts_rejects_unknown_task(self):
+        with self.assertRaises(PilotPolicyError):
+            select_task_counts(["not_a_real_task"])
+
+    def test_run_condition_signature_accepts_task_counts_and_uses_it(self):
+        # Static/structural check (no GPU): run_condition must accept a
+        # task_counts parameter and must not hardcode the module-level
+        # PILOT_TASK_COUNTS inside its body.
+        import inspect
+
+        import run_layer_sensitivity_pilot as drv
+
+        sig = inspect.signature(drv.run_condition)
+        self.assertIn("task_counts", sig.parameters)
+        source = inspect.getsource(drv.run_condition)
+        self.assertNotIn("PILOT_TASK_COUNTS.items()", source)
+        self.assertIn("task_counts.items()", source)
+
+    def test_dry_run_total_examples_reflects_single_task_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [
+                "--dry-run", "--tasks", "trec",
+                "--policies-dir", os.path.join(tmp, "policies"),
+                "--output-root", os.path.join(tmp, "out"),
+            ]
+            with mock.patch.object(sys, "argv", ["run_layer_sensitivity_pilot.py"] + argv):
+                with mock.patch("builtins.print") as mock_print:
+                    rc = driver.main()
+            self.assertEqual(rc, 0)
+            printed = "\n".join(str(c.args[0]) for c in mock_print.call_args_list)
+            self.assertIn("Total examples: 16 x 200 = 3200", printed)
+
+    def test_initial_manifest_records_only_selected_tasks(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_pilot_policies(os.path.join(tmp, "policies"))
+            conditions = discover_and_validate_pilot_policies(os.path.join(tmp, "policies"))
+            for c in conditions:
+                c["output_dir"] = os.path.join(tmp, "out", output_dir_name(c))
+
+            class _Args:
+                pass
+
+            manifest = driver.build_initial_pilot_manifest(conditions, _Args(), select_task_counts(["trec", "lcc"]))
+            self.assertEqual(manifest["tasks"], ["trec", "lcc"])
+            self.assertEqual(manifest["total_examples"], 16 * (200 + 500))
+            for c in manifest["conditions"]:
+                self.assertEqual(c["tasks"], ["trec", "lcc"])
 
 
 # --- resume semantics ---------------------------------------------------------
@@ -399,6 +463,67 @@ class TestSingleInstanceLock(unittest.TestCase):
             driver.release_pilot_lock(fh1)
             fh2 = driver.acquire_pilot_lock(lock_path)
             driver.release_pilot_lock(fh2)  # must not raise
+
+
+# --- NaN/Inf instrumentation (Stage D1 gap found after the canary: run_condition
+# had no direct NaN/Inf check, unlike scripts/layer_policy_smoke.py) ---------
+
+class TestNanInfInstrumentation(unittest.TestCase):
+    def test_run_condition_registers_lm_head_hook_and_records_flag(self):
+        import inspect
+
+        import run_layer_sensitivity_pilot as drv
+
+        source = inspect.getsource(drv.run_condition)
+        self.assertIn("register_forward_hook", source)
+        self.assertIn("nonfinite_logits_seen", source)
+        self.assertIn("torch.isfinite", source)
+        # Hook must be removed unconditionally (finally block), not only on
+        # the success path, and must not crash if model construction itself
+        # failed before the hook was ever registered.
+        self.assertIn("hook_handle = None", source)
+        self.assertIn("if hook_handle is not None", source)
+
+
+# --- resume dry-run report (Part E: dry-run must prove a completed
+# condition/task is recognized as SKIP, using the exact-count rule) ---------
+
+class TestResumeReport(unittest.TestCase):
+    def test_completed_task_reports_skip_at_exact_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_pilot_policies(os.path.join(tmp, "policies"))
+            conditions = discover_and_validate_pilot_policies(os.path.join(tmp, "policies"), layers=(0,), axes=("key",))
+            for c in conditions:
+                c["output_dir"] = os.path.join(tmp, "out", output_dir_name(c))
+            condition_dir = conditions[0]["output_dir"]
+            os.makedirs(condition_dir)
+            _write_jsonl(os.path.join(condition_dir, "trec.jsonl"), [{"pred": "x", "answers": ["a"], "all_classes": [], "length": 1} for _ in range(200)])
+
+            report = driver.compute_resume_report(conditions, select_task_counts(["trec"]), os.path.join(tmp, "out"))
+            self.assertEqual(len(report), 1)
+            self.assertEqual(report[0], {"condition_id": "layer00_key", "task": "trec", "action": "skip", "done": 200, "expected": 200})
+
+    def test_over_count_reports_error_not_skip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_pilot_policies(os.path.join(tmp, "policies"))
+            conditions = discover_and_validate_pilot_policies(os.path.join(tmp, "policies"), layers=(0,), axes=("key",))
+            for c in conditions:
+                c["output_dir"] = os.path.join(tmp, "out", output_dir_name(c))
+            condition_dir = conditions[0]["output_dir"]
+            os.makedirs(condition_dir)
+            _write_jsonl(os.path.join(condition_dir, "trec.jsonl"), [{"pred": "x", "answers": ["a"], "all_classes": [], "length": 1} for _ in range(201)])
+
+            report = driver.compute_resume_report(conditions, select_task_counts(["trec"]), os.path.join(tmp, "out"))
+            self.assertEqual(report[0]["action"], "ERROR")
+
+    def test_no_existing_output_reports_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            write_pilot_policies(os.path.join(tmp, "policies"))
+            conditions = discover_and_validate_pilot_policies(os.path.join(tmp, "policies"), layers=(0,), axes=("key",))
+            for c in conditions:
+                c["output_dir"] = os.path.join(tmp, "out", output_dir_name(c))
+            report = driver.compute_resume_report(conditions, select_task_counts(["trec"]), os.path.join(tmp, "out"))
+            self.assertEqual(report[0]["action"], "start")
 
 
 # --- baseline audit ------------------------------------------------------------

@@ -40,6 +40,7 @@ from utils.pilot_policy import (  # noqa: E402
     PILOT_TASK_COUNTS,
     discover_and_validate_pilot_policies,
     output_dir_name,
+    select_task_counts,
     total_example_count,
     write_pilot_policies,
 )
@@ -227,6 +228,28 @@ def resolve_pilot_task_resume_plan(task, out_path, partial_path, expected):
     return "start", partial_path, 0
 
 
+def compute_resume_report(conditions, task_counts, output_root):
+    """For every (condition, task) pair, inspects any existing output under
+    output_root and reports the resume decision resolve_pilot_task_resume_plan
+    would make -- without generating anything. Used by --dry-run to prove a
+    future full invocation would skip already-complete work (and by the
+    canary's own post-hoc verification). A PilotResumeError for one
+    (condition, task) is captured as an "ERROR" entry rather than raised, so
+    one corrupt condition doesn't stop the report for the other 15."""
+    report = []
+    for c in conditions:
+        condition_dir = os.path.join(output_root, output_dir_name(c))
+        for task, expected in task_counts.items():
+            out_path = os.path.join(condition_dir, f"{task}.jsonl")
+            partial_path = out_path + ".partial"
+            try:
+                action, _active_path, done = resolve_pilot_task_resume_plan(task, out_path, partial_path, expected)
+                report.append({"condition_id": c["condition_id"], "task": task, "action": action, "done": done, "expected": expected})
+            except PilotResumeError as e:
+                report.append({"condition_id": c["condition_id"], "task": task, "action": "ERROR", "done": None, "expected": expected, "error": str(e)})
+    return report
+
+
 def finalize_task_if_ready(action, active_path, out_path, expected):
     """Atomically renames a fully-written partial to its final name once
     resolve_pilot_task_resume_plan reports "finalize" or once a fresh
@@ -245,7 +268,7 @@ def finalize_task_if_ready(action, active_path, out_path, expected):
 # Per-condition directory / config (section 2, 6)
 # ---------------------------------------------------------------------------
 
-def build_condition_run_config(condition, model_name_or_path, max_length, group_size, residual_length, seed):
+def build_condition_run_config(condition, model_name_or_path, max_length, group_size, residual_length, seed, task_counts=PILOT_TASK_COUNTS):
     return {
         "model_name_or_path": model_name_or_path,
         "condition_id": condition["condition_id"],
@@ -259,8 +282,8 @@ def build_condition_run_config(condition, model_name_or_path, max_length, group_
         "group_size": group_size,
         "residual_length": residual_length,
         "seed": seed,
-        "tasks": list(PILOT_TASK_COUNTS),
-        "expected_task_counts": dict(PILOT_TASK_COUNTS),
+        "tasks": list(task_counts),
+        "expected_task_counts": dict(task_counts),
         "pilot": "layer_sensitivity_pilot_stage_d0",
     }
 
@@ -301,14 +324,14 @@ def prepare_condition_directory(condition_dir, run_config):
 # Pilot-wide manifest (section 9) -- crash-safe via write-temp + os.replace.
 # ---------------------------------------------------------------------------
 
-def build_initial_pilot_manifest(conditions, args):
+def build_initial_pilot_manifest(conditions, args, task_counts=PILOT_TASK_COUNTS):
     return {
         "generated_at": datetime.now(timezone.utc).astimezone().isoformat(),
         "pilot": "layer_sensitivity_pilot_stage_d0",
         "num_conditions": len(conditions),
-        "tasks": list(PILOT_TASK_COUNTS),
-        "expected_task_counts": dict(PILOT_TASK_COUNTS),
-        "total_examples": total_example_count(),
+        "tasks": list(task_counts),
+        "expected_task_counts": dict(task_counts),
+        "total_examples": total_example_count(task_counts, len(conditions)),
         "conditions": [
             {
                 "condition_id": c["condition_id"],
@@ -318,8 +341,8 @@ def build_initial_pilot_manifest(conditions, args):
                 "v_bits": c["v_bits"],
                 "policy_path": c["policy_path"],
                 "policy_hash": c["resolved_policy_hash"],
-                "tasks": list(PILOT_TASK_COUNTS),
-                "expected_task_counts": dict(PILOT_TASK_COUNTS),
+                "tasks": list(task_counts),
+                "expected_task_counts": dict(task_counts),
                 "status": "pending",
                 "output_dir": c["output_dir"],
             }
@@ -431,12 +454,13 @@ def get_git_commit():
 # this round -- see the final report for the exact future launch command).
 # ---------------------------------------------------------------------------
 
-def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: no cover - GPU path, not exercised in Stage D0
+def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=PILOT_TASK_COUNTS):  # pragma: no cover - GPU path, not exercised in Stage D0
     """Runs one pilot condition end to end: build the KIVI model with this
-    condition's layer policy, generate the 4 screening tasks with durable
-    per-row fsync + exact-count resume, host-monitor sampling every 30s,
-    then finalize. Deferred (heavy) imports happen here only -- --dry-run
-    never reaches this function."""
+    condition's layer policy, generate exactly `task_counts` (a subset or
+    the full 4 screening tasks, per --tasks) with durable per-row fsync +
+    exact-count resume, host-monitor sampling every 30s, then finalize.
+    Deferred (heavy) imports happen here only -- --dry-run never reaches
+    this function."""
     import gc
     import threading
 
@@ -447,7 +471,8 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: n
 
     condition_dir = os.path.join(args.output_root, output_dir_name(condition))
     run_config = build_condition_run_config(
-        condition, args.model_name_or_path, args.max_length, args.group_size, args.residual_length, args.seed
+        condition, args.model_name_or_path, args.max_length, args.group_size, args.residual_length, args.seed,
+        task_counts=task_counts,
     )
     status = prepare_condition_directory(condition_dir, run_config)
 
@@ -467,6 +492,8 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: n
     boot_id_start = get_boot_id()
     start_time = datetime.now(timezone.utc).astimezone().isoformat()
     exit_code = 1
+    hook_handle = None
+    nan_inf_flags = {"seen_nonfinite": False}
     try:
         plb.seed_everything(args.seed)
 
@@ -493,7 +520,17 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: n
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model_short_name = args.model_name_or_path.split("/")[-1]
 
-        for task, expected in PILOT_TASK_COUNTS.items():
+        # Smoke-only-style diagnostic (same pattern as layer_policy_smoke.py):
+        # a forward hook on the real lm_head module, not a production code
+        # change, recording whether any logits tensor produced during this
+        # condition's generation contains NaN/Inf.
+        def _lm_head_hook(module, inp, output):
+            if not torch.isfinite(output).all():
+                nan_inf_flags["seen_nonfinite"] = True
+
+        hook_handle = model.lm_head.register_forward_hook(_lm_head_hook)
+
+        for task, expected in task_counts.items():
             out_path = os.path.join(condition_dir, f"{task}.jsonl")
             partial_path = out_path + ".partial"
             action, active_path, done = resolve_pilot_task_resume_plan(task, out_path, partial_path, expected)
@@ -542,6 +579,8 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: n
 
         exit_code = 0
     finally:
+        if hook_handle is not None:
+            hook_handle.remove()
         stop_monitor.set()
         monitor_thread.join(timeout=5)
         end_time = datetime.now(timezone.utc).astimezone().isoformat()
@@ -554,6 +593,7 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen):  # pragma: n
             "boot_id_end": boot_id_end,
             "boot_id_stable": boot_id_start == boot_id_end,
             "exit_code": exit_code,
+            "nonfinite_logits_seen": nan_inf_flags["seen_nonfinite"],
             "git_commit": get_git_commit(),
             "kernel_log_note": "journalctl inspection is permission-blocked in this environment; not claimed clean.",
         }
@@ -590,6 +630,8 @@ def parse_args(argv=None):
 def main():
     args = parse_args()
 
+    task_counts = select_task_counts(args.tasks)
+
     write_pilot_policies(args.policies_dir)
     conditions = discover_and_validate_pilot_policies(args.policies_dir, args.layers, args.axes)
     for c in conditions:
@@ -602,7 +644,7 @@ def main():
     if len(set(hashes)) != len(hashes):
         raise PilotConfigError("Policy hash collision detected among pilot conditions.")
 
-    baseline_audit = audit_fp16_baseline_reuse(args.fp16_baseline_dir)
+    baseline_audit = audit_fp16_baseline_reuse(args.fp16_baseline_dir, task_counts)
     conflicts = check_no_conflicting_process()
 
     if args.dry_run:
@@ -610,10 +652,11 @@ def main():
         for c in conditions:
             print(f"  {c['condition_id']:16s} layer={c['layer_idx']:2d} axis={c['axis']:5s} "
                   f"K{c['k_bits']}/V{c['v_bits']:<3d} hash={c['resolved_policy_hash']} -> {c['output_dir']}")
-        n_tasks = len(PILOT_TASK_COUNTS)
-        n_examples = total_example_count()
-        print(f"\nDataset evaluations: {len(conditions)} conditions x {n_tasks} tasks = {len(conditions) * n_tasks}")
-        print(f"Total examples: {len(conditions)} x {sum(PILOT_TASK_COUNTS.values())} = {n_examples}")
+        n_tasks = len(task_counts)
+        n_examples = total_example_count(task_counts, len(conditions))
+        print(f"\nSelected tasks: {list(task_counts)}")
+        print(f"Dataset evaluations: {len(conditions)} conditions x {n_tasks} tasks = {len(conditions) * n_tasks}")
+        print(f"Total examples: {len(conditions)} x {sum(task_counts.values())} = {n_examples}")
         print(f"\nOutput directory collisions: {'NONE' if len(set(output_dirs)) == len(output_dirs) else 'FOUND'}")
         print(f"Policy hash collisions: {'NONE' if len(set(hashes)) == len(hashes) else 'FOUND'}")
         print(f"\nFP16 baseline reuse audit ({args.fp16_baseline_dir}):")
@@ -621,6 +664,15 @@ def main():
         for task, info in baseline_audit["tasks"].items():
             print(f"  {task}: {info}")
         print(f"  reusable (integrity-only check): {baseline_audit['reusable']}")
+        resume_report = compute_resume_report(conditions, task_counts, args.output_root)
+        non_start = [r for r in resume_report if r["action"] != "start"]
+        print(f"\nResume inspection against {args.output_root} ({len(resume_report)} condition-task pairs checked):")
+        if non_start:
+            for r in non_start:
+                extra = f" ({r['done']}/{r['expected']})" if r["done"] is not None else f" -- {r.get('error')}"
+                print(f"  {r['condition_id']}/{r['task']}: {r['action']}{extra}")
+        else:
+            print("  all pending (action=start) -- no existing output found under this root")
         print(f"\nConflicting-process check ({', '.join(CONFLICTING_PROCESS_PATTERNS)}): "
               f"{'NONE FOUND' if not conflicts else conflicts}")
         print("\nNo GPU process will be launched (--dry-run); torch/transformers/datasets were not imported.")
@@ -634,7 +686,7 @@ def main():
     try:
         os.makedirs(args.output_root, exist_ok=True)
         manifest_path = os.path.join(args.output_root, "pilot_manifest.json")
-        manifest = build_initial_pilot_manifest(conditions, args)
+        manifest = build_initial_pilot_manifest(conditions, args, task_counts)
         write_pilot_manifest_atomic(manifest_path, manifest)
 
         dataset2prompt = json.load(open(os.path.join(REPO_ROOT, "config/dataset2prompt.json"), "r"))
@@ -645,7 +697,7 @@ def main():
             update_condition_status(manifest, c["condition_id"], "running")
             write_pilot_manifest_atomic(manifest_path, manifest)
 
-            exit_code = run_condition(c, args, dataset2prompt, dataset2maxlen)
+            exit_code = run_condition(c, args, dataset2prompt, dataset2maxlen, task_counts)
 
             manifest = read_pilot_manifest(manifest_path)
             update_condition_status(manifest, c["condition_id"], "complete" if exit_code == 0 else "failed")
