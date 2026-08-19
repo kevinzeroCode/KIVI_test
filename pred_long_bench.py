@@ -13,6 +13,13 @@ os.environ["WANDB_DISABLED"] = "true"
 import transformers
 from utils.process_args import process_args
 from utils.jsonl_integrity import inspect_jsonl
+from utils.layer_policy import (
+    LayerPolicyError,
+    canonical_policy_dict,
+    load_policy_file,
+    policy_hash,
+    resolve_layer_policy,
+)
 from transformers import LlamaConfig, MistralConfig, AutoTokenizer
 
 
@@ -75,8 +82,14 @@ ALLOWED_BITS = {2, 4, 16}
 PRED_ROOT = os.environ.get("KIVI_PRED_ROOT", "pred")
 PRED_E_ROOT = os.environ.get("KIVI_PRED_E_ROOT", "pred_e")
 
+# layer_policy_hash ensures two different --layer_policy files are never
+# considered resume-compatible merely because their global k_bits/v_bits CLI
+# args happen to match. It's None for every global (non-layer-policy) run,
+# and .get() reads it as None on pre-existing run_config.json files that
+# predate this key entirely -- so it's a no-op for all legacy directories.
 RUN_CONFIG_CORE_KEYS = [
     "model_name_or_path", "k_bits", "v_bits", "group_size", "residual_length", "max_length",
+    "layer_policy_hash",
 ]
 
 
@@ -116,6 +129,22 @@ def build_pred_dir_name(model_name, max_length, k_bits, v_bits, group_size, resi
     return f"{model_name}_{max_length}_k{k_bits}_v{v_bits}_group{group_size}_residual{residual_length}"
 
 
+def build_layer_policy_pred_dir_name(model_name, max_length, policy_name, policy_hash_value, group_size, residual_length):
+    """Output prediction directory name for a --layer_policy run.
+
+    Never touches build_pred_dir_name (global runs keep their exact current
+    naming). The 'layerpolicy_' prefix means this can never collide with a
+    global run's directory name (neither the symmetric nor the k{K}_v{V}
+    scheme produces this prefix), and the content-hash suffix means two
+    different policy files that happen to share a human policy_name still
+    can't collide with each other.
+    """
+    return (
+        f"{model_name}_{max_length}_layerpolicy_{policy_name}-{policy_hash_value}"
+        f"_group{group_size}_residual{residual_length}"
+    )
+
+
 def get_git_commit():
     try:
         repo_root = os.path.dirname(os.path.abspath(__file__))
@@ -126,21 +155,38 @@ def get_git_commit():
         return None
 
 
-def build_run_config(model_args, max_length, model_class_name, quantize_key, quantize_value, seed):
-    return {
+def build_run_config(model_args, max_length, model_class_name, quantize_key, quantize_value, seed, resolved_layer_policy=None):
+    """resolved_layer_policy is a utils.layer_policy.ResolvedLayerPolicy, or
+    None for a global run (the default -- exactly today's run_config.json
+    shape, k_bits/v_bits/quantize_key/quantize_value are the single global
+    scalars/booleans, layer_policy_hash is None).
+
+    When a layer policy is active, k_bits/v_bits/quantize_key/quantize_value
+    become None at the top level (they are no longer single scalars) and the
+    full per-layer breakdown is embedded under "layer_policy", with
+    "layer_policy_hash" duplicated at the top level for the resume-identity
+    check in RUN_CONFIG_CORE_KEYS.
+    """
+    is_layer_policy = resolved_layer_policy is not None
+    run_config = {
         "model_name_or_path": model_args.model_name_or_path,
-        "k_bits": model_args.k_bits,
-        "v_bits": model_args.v_bits,
+        "k_bits": None if is_layer_policy else model_args.k_bits,
+        "v_bits": None if is_layer_policy else model_args.v_bits,
         "group_size": model_args.group_size,
         "residual_length": model_args.residual_length,
         "max_length": max_length,
         "seed": seed,
         "model_class": model_class_name,
-        "quantize_key": quantize_key,
-        "quantize_value": quantize_value,
+        "quantize_key": None if is_layer_policy else quantize_key,
+        "quantize_value": None if is_layer_policy else quantize_value,
         "git_commit": get_git_commit(),
         "transformers_version": transformers.__version__,
+        "layer_policy_hash": None,
     }
+    if is_layer_policy:
+        run_config["layer_policy"] = canonical_policy_dict(resolved_layer_policy)
+        run_config["layer_policy_hash"] = policy_hash(resolved_layer_policy)
+    return run_config
 
 
 def load_run_config(pred_dir):
@@ -310,12 +356,20 @@ def seed_everything(seed):
     torch.cuda.manual_seed_all(seed)
 
 
-def build_model_and_tokenizer(model_args, training_args, dtype, use_kivi_model):
-    """Load config/tokenizer/model for the requested (k_bits, v_bits).
+def build_model_and_tokenizer(model_args, training_args, dtype, use_kivi_model, resolved_layer_policy=None):
+    """Load config/tokenizer/model for the requested (k_bits, v_bits), or
+    for a resolved per-layer policy.
 
     Factored out of __main__ so smoke tests can exercise the exact same
     production loader decision (see loader_decision()) without duplicating
     it or running the full LongBench prediction loop.
+
+    resolved_layer_policy is a utils.layer_policy.ResolvedLayerPolicy or
+    None. When given, config.layer_kv_policy is set on the Llama config
+    before model construction, which models/llama_kivi.py's
+    _resolve_layer_kv_bits() prefers over the global config.k_bits/v_bits
+    for every layer -- see that function's docstring for the exact fallback
+    contract. Only implemented for the Llama/LongChat branch (Stage A scope).
     """
     if 'llama' in model_args.model_name_or_path.lower() or 'longchat' in model_args.model_name_or_path.lower():
         config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
@@ -345,6 +399,9 @@ def build_model_and_tokenizer(model_args, training_args, dtype, use_kivi_model):
             config.v_bits = model_args.v_bits
             config.group_size = model_args.group_size
             config.residual_length = model_args.residual_length
+            if resolved_layer_policy is not None:
+                from utils.layer_policy import layers_as_config_list
+                config.layer_kv_policy = layers_as_config_list(resolved_layer_policy)
             configure_kivi_memory_chunks(config)
             config.use_flash = True # Note: We activate the flashattention to speed up the inference
             model = LlamaForCausalLM_KIVI.from_pretrained(
@@ -418,13 +475,43 @@ if __name__ == '__main__':
     # define your model
     model_args, data_args, training_args = process_args()
     # print(model_args, data_args, training_args)
-    validate_bits(model_args.k_bits, model_args.v_bits)
-    quantize_key, quantize_value, use_kivi_model = loader_decision(model_args.k_bits, model_args.v_bits)
+
+    resolved_layer_policy = None
+    if model_args.layer_policy:
+        is_llama_family = (
+            "llama" in model_args.model_name_or_path.lower()
+            or "longchat" in model_args.model_name_or_path.lower()
+        )
+        if not is_llama_family:
+            raise NotImplementedError(
+                "--layer_policy is only implemented for Llama/LongChat models in Stage A "
+                f"(got model_name_or_path={model_args.model_name_or_path!r})"
+            )
+        # num_hidden_layers is needed to resolve the policy before model
+        # construction; this is a small cached-config read (no weights), not
+        # a second model load.
+        probe_config = LlamaConfig.from_pretrained(model_args.model_name_or_path)
+        policy_obj = load_policy_file(model_args.layer_policy)
+        resolved_layer_policy = resolve_layer_policy(
+            probe_config.num_hidden_layers, model_args.k_bits, model_args.v_bits, policy_obj
+        )
+        # A layer policy always executes through LlamaForCausalLM_KIVI (even
+        # an all-16/16 policy uses its per-layer FP16 pass-through route),
+        # regardless of the (now-ignored-for-bit-resolution) global
+        # --k_bits/--v_bits CLI values.
+        use_kivi_model = True
+        quantize_key, quantize_value = None, None
+    else:
+        validate_bits(model_args.k_bits, model_args.v_bits)
+        quantize_key, quantize_value, use_kivi_model = loader_decision(model_args.k_bits, model_args.v_bits)
+
     model_name = model_args.model_name_or_path.split("/")[-1]
     # dtype = torch.bfloat16 if training_args.bf16 else torch.float
     dtype = torch.float16
 
-    model, tokenizer, model_class_name = build_model_and_tokenizer(model_args, training_args, dtype, use_kivi_model)
+    model, tokenizer, model_class_name = build_model_and_tokenizer(
+        model_args, training_args, dtype, use_kivi_model, resolved_layer_policy=resolved_layer_policy
+    )
 
     #
     # Load model directly
@@ -442,10 +529,19 @@ if __name__ == '__main__':
             return "KIVI quantized"
         return "FP16 pass-through" if use_kivi_model else "FP16"
 
-    run_config = build_run_config(model_args, max_length, model_class_name, quantize_key, quantize_value, seed=42)
-    pred_dir_name = build_pred_dir_name(
-        model_name, max_length, model_args.k_bits, model_args.v_bits, model_args.group_size, model_args.residual_length
+    run_config = build_run_config(
+        model_args, max_length, model_class_name, quantize_key, quantize_value, seed=42,
+        resolved_layer_policy=resolved_layer_policy,
     )
+    if resolved_layer_policy is not None:
+        pred_dir_name = build_layer_policy_pred_dir_name(
+            model_name, max_length, resolved_layer_policy.policy_name, policy_hash(resolved_layer_policy),
+            model_args.group_size, model_args.residual_length,
+        )
+    else:
+        pred_dir_name = build_pred_dir_name(
+            model_name, max_length, model_args.k_bits, model_args.v_bits, model_args.group_size, model_args.residual_length
+        )
     pred_root = PRED_E_ROOT if data_args.e else PRED_ROOT
     if not os.path.exists(pred_root):
         os.makedirs(pred_root)
@@ -453,12 +549,18 @@ if __name__ == '__main__':
     resume_status = prepare_run_directory(pred_dir, run_config)
 
     print(f"Model class: {model_class_name}")
-    print(f"K bits: {model_args.k_bits}")
-    print(f"V bits: {model_args.v_bits}")
-    print(f"quantize_key: {quantize_key}")
-    print(f"quantize_value: {quantize_value}")
-    print(f"Key route: {_route_label(quantize_key)}")
-    print(f"Value route: {_route_label(quantize_value)}")
+    if resolved_layer_policy is not None:
+        print(f"Layer policy: {resolved_layer_policy.policy_name} (hash={policy_hash(resolved_layer_policy)})")
+        print(f"Layer policy file: {model_args.layer_policy}")
+        n_layers = len(resolved_layer_policy.layers)
+        print(f"Layers: {n_layers} total; per-layer k_bits/v_bits embedded in run_config.json's 'layer_policy' field")
+    else:
+        print(f"K bits: {model_args.k_bits}")
+        print(f"V bits: {model_args.v_bits}")
+        print(f"quantize_key: {quantize_key}")
+        print(f"quantize_value: {quantize_value}")
+        print(f"Key route: {_route_label(quantize_key)}")
+        print(f"Value route: {_route_label(quantize_value)}")
     print(f"Output directory: {pred_dir}")
     print(f"Resume metadata status: {resume_status}")
 

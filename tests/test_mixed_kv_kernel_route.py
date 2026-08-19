@@ -96,7 +96,7 @@ class TestKernelRoute(unittest.TestCase):
 
     def test_k2_v16_key_quantized_value_passthrough(self):
         config = make_config(k_bits=2, v_bits=16)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         self.assertTrue(attn.quantize_key)
         self.assertFalse(attn.quantize_value)
 
@@ -115,7 +115,7 @@ class TestKernelRoute(unittest.TestCase):
 
     def test_k16_v2_key_passthrough_value_quantized(self):
         config = make_config(k_bits=16, v_bits=2)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         self.assertFalse(attn.quantize_key)
         self.assertTrue(attn.quantize_value)
 
@@ -134,7 +134,7 @@ class TestKernelRoute(unittest.TestCase):
         # that would mean the value side was incorrectly routed through the
         # quantized kernel (which only supports 2/4-bit).
         config = make_config(k_bits=2, v_bits=16)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         real_bmm = llama_kivi.cuda_bmm_fA_qB_outer
         seen_bits = []
 
@@ -160,7 +160,7 @@ class TestKernelRoute(unittest.TestCase):
 
     def test_k16_v2_never_quantizes_or_matmuls_key_side(self):
         config = make_config(k_bits=16, v_bits=2)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         real_bmm = llama_kivi.cuda_bmm_fA_qB_outer
         seen_bits = []
 
@@ -188,7 +188,7 @@ class TestKernelRoute(unittest.TestCase):
         # Regression guard: symmetric KIVI-2 must still call both kernels for
         # both sides after the pass-through branches were added.
         config = make_config(k_bits=2, v_bits=2)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         counts, spy_quant, spy_bmm = self._spy_counts()
         with mock.patch.object(llama_kivi, "triton_quantize_and_pack_along_last_dim", spy_quant), \
              mock.patch.object(llama_kivi, "cuda_bmm_fA_qB_outer", spy_bmm):
@@ -198,7 +198,7 @@ class TestKernelRoute(unittest.TestCase):
 
     def test_k4_v4_both_sides_still_quantized(self):
         config = make_config(k_bits=4, v_bits=4)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         counts, spy_quant, spy_bmm = self._spy_counts()
         with mock.patch.object(llama_kivi, "triton_quantize_and_pack_along_last_dim", spy_quant), \
              mock.patch.object(llama_kivi, "cuda_bmm_fA_qB_outer", spy_bmm):
@@ -208,7 +208,7 @@ class TestKernelRoute(unittest.TestCase):
 
     def test_k16_v16_never_quantizes_or_matmuls(self):
         config = make_config(k_bits=16, v_bits=16)
-        attn = llama_kivi.LlamaFlashAttention_KIVI(config).to("cuda", dtype=torch.float16).eval()
+        attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to("cuda", dtype=torch.float16).eval()
         self.assertFalse(attn.quantize_key)
         self.assertFalse(attn.quantize_value)
         counts, spy_quant, spy_bmm = self._spy_counts()

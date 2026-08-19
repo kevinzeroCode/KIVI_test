@@ -41,6 +41,19 @@ class ModelArguments:
         default=128,
         metadata={"help": "KV_cache residual length."},
     )
+    layer_policy: Optional[str] = field(
+        default=None,
+        metadata={
+            "help": (
+                "Path to a sparse per-layer K/V bit-width policy JSON file "
+                "(see utils/layer_policy.py). When omitted, behavior is "
+                "exactly the global --k_bits/--v_bits behavior unchanged. "
+                "When given, --k_bits/--v_bits are ignored for per-layer "
+                "bit resolution (the policy file's own 'default' cell "
+                "governs); group_size/residual_length remain global either way."
+            )
+        },
+    )
     output_model_filename: Optional[str] = field(
         default="test-output", metadata={"help": "Output model relative manifold path"}
     )

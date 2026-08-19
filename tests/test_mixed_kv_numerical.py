@@ -97,7 +97,7 @@ class MixedNumericalFixture:
     def __init__(self, k_bits, v_bits, seed=0):
         torch.manual_seed(seed)
         config = make_config(k_bits, v_bits)
-        self.kivi_attn = llama_kivi.LlamaFlashAttention_KIVI(config).to(DEVICE, dtype=DTYPE).eval()
+        self.kivi_attn = llama_kivi.LlamaFlashAttention_KIVI(config, layer_idx=0).to(DEVICE, dtype=DTYPE).eval()
         self.ref_attn = LlamaAttention(config, layer_idx=0).to(DEVICE, dtype=DTYPE).eval()
         copy_projection_weights(self.kivi_attn, self.ref_attn)
 

@@ -135,12 +135,40 @@ def _apply_rotary_pos_emb_inplace(
     return query_states, key_states
 
 
+def _resolve_layer_kv_bits(config, layer_idx):
+    """Resolve (k_bits, v_bits) for one decoder layer.
+
+    If config.layer_kv_policy is set -- a list of {"k_bits", "v_bits",
+    "family"} dicts, one per layer, produced by
+    utils.layer_policy.resolve_layer_policy() and validated before model
+    construction -- use this layer's entry (only family == "kivi" is
+    executable; a bit width of 16 under "kivi" is the existing
+    FP16/pass-through route, not a distinct quantizer).
+
+    Otherwise fall back to the global config.k_bits/config.v_bits exactly as
+    before per-layer policies existed. This fallback is what keeps every
+    existing global run (k_bits/v_bits set once on the shared config) byte-
+    for-byte unchanged when no --layer_policy is given.
+    """
+    layer_policy = getattr(config, "layer_kv_policy", None)
+    if layer_policy is None:
+        return config.k_bits, config.v_bits
+    entry = layer_policy[layer_idx]
+    if entry.get("family", "kivi") != "kivi":
+        raise ValueError(
+            f"layer {layer_idx}: family={entry.get('family')!r} is not executable "
+            "(only 'kivi' is implemented)"
+        )
+    return entry["k_bits"], entry["v_bits"]
+
+
 class LlamaAttention_KIVI(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.config = config
+        self.layer_idx = layer_idx
         self.attention_dropout = config.attention_dropout
         self.hidden_size = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -150,8 +178,7 @@ class LlamaAttention_KIVI(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
-        self.k_bits = config.k_bits
-        self.v_bits = config.v_bits
+        self.k_bits, self.v_bits = _resolve_layer_kv_bits(config, layer_idx)
         assert self.k_bits in (2, 4, 16), f"Unsupported k_bits={self.k_bits}; allowed values are 2, 4, 16"
         assert self.v_bits in (2, 4, 16), f"Unsupported v_bits={self.v_bits}; allowed values are 2, 4, 16"
         # quantize_key/quantize_value False means that side keeps a full-precision
@@ -734,13 +761,14 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
     
 
 class LlamaDecoderLayer_KIVI(nn.Module):
-    def __init__(self, config: LlamaConfig):
+    def __init__(self, config: LlamaConfig, layer_idx: int):
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.layer_idx = layer_idx
         self.self_attn = (
-            LlamaAttention_KIVI(config=config)
+            LlamaAttention_KIVI(config=config, layer_idx=layer_idx)
             if not getattr(config, "use_flash", False)
-            else LlamaFlashAttention_KIVI(config=config)
+            else LlamaFlashAttention_KIVI(config=config, layer_idx=layer_idx)
         )
         self.mlp = LlamaMLP(config)
         self.mlp_chunk_size = getattr(config, "mlp_chunk_size", 8192)
@@ -823,7 +851,9 @@ class LlamaModel_KIVI(LlamaPreTrainedModel):
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, self.padding_idx)
-        self.layers = nn.ModuleList([LlamaDecoderLayer_KIVI(config) for _ in range(config.num_hidden_layers)])
+        self.layers = nn.ModuleList(
+            [LlamaDecoderLayer_KIVI(config, layer_idx=i) for i in range(config.num_hidden_layers)]
+        )
         self.norm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.norm_chunk_size = getattr(config, "norm_chunk_size", getattr(config, "mlp_chunk_size", 2048))
 
