@@ -1,0 +1,450 @@
+[
+  {
+    "condition_id": "layer00_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer00_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer04_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer09_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer13_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer18_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer22_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer27_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_key",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_key",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_key",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_key",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_value",
+    "task": "trec",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_value",
+    "task": "lcc",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_value",
+    "task": "passage_retrieval_en",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  },
+  {
+    "condition_id": "layer31_value",
+    "task": "2wikimqa",
+    "paired": true,
+    "n_mismatches": 0,
+    "first_mismatches": []
+  }
+]

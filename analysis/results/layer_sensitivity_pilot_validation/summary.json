@@ -1,0 +1,199 @@
+{
+  "verdict": "FULL_STAGE_D_GENERATION = PASS",
+  "inventory": {
+    "expected_condition_count": 16,
+    "actual_condition_dir_count": 16,
+    "missing_conditions": [],
+    "unexpected_directories": [],
+    "all_16_hashes_unique": true,
+    "matrix": [
+      {
+        "condition_id": "layer00_key",
+        "layer_idx": 0,
+        "axis": "key",
+        "policy_hash": "4c4b21298993",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer00_value",
+        "layer_idx": 0,
+        "axis": "value",
+        "policy_hash": "11453b64892d",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer04_key",
+        "layer_idx": 4,
+        "axis": "key",
+        "policy_hash": "4911a4cffb38",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer04_value",
+        "layer_idx": 4,
+        "axis": "value",
+        "policy_hash": "6980c9945814",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer09_key",
+        "layer_idx": 9,
+        "axis": "key",
+        "policy_hash": "e7337160e3e8",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer09_value",
+        "layer_idx": 9,
+        "axis": "value",
+        "policy_hash": "0ee385d6ea7d",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer13_key",
+        "layer_idx": 13,
+        "axis": "key",
+        "policy_hash": "84dd83168404",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer13_value",
+        "layer_idx": 13,
+        "axis": "value",
+        "policy_hash": "630416acd16d",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer18_key",
+        "layer_idx": 18,
+        "axis": "key",
+        "policy_hash": "5cc48107d95c",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer18_value",
+        "layer_idx": 18,
+        "axis": "value",
+        "policy_hash": "eb8f37a0cd71",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer22_key",
+        "layer_idx": 22,
+        "axis": "key",
+        "policy_hash": "f12ffb2ce56a",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer22_value",
+        "layer_idx": 22,
+        "axis": "value",
+        "policy_hash": "5ff90802caa8",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer27_key",
+        "layer_idx": 27,
+        "axis": "key",
+        "policy_hash": "0a88c905e83d",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer27_value",
+        "layer_idx": 27,
+        "axis": "value",
+        "policy_hash": "978392f1115c",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer31_key",
+        "layer_idx": 31,
+        "axis": "key",
+        "policy_hash": "64866e3c312f",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      },
+      {
+        "condition_id": "layer31_value",
+        "layer_idx": 31,
+        "axis": "value",
+        "policy_hash": "fc812af10316",
+        "dir_present": true,
+        "task_files_present": 4,
+        "task_files_expected": 4
+      }
+    ]
+  },
+  "jsonl_validation": {
+    "n_files_checked": 64,
+    "n_files_pass": 64,
+    "n_partial_remaining": 0,
+    "total_rows": 17600,
+    "expected_total_rows": 17600
+  },
+  "pairing_validation": {
+    "n_files_paired": 64,
+    "n_files_total": 64,
+    "n_rows_paired": 17600,
+    "n_rows_total": 17600,
+    "baseline_dir": "/home/kevin/Documents/KIVI_test/pred/longchat-7b-v1.5-32k_31500_16bits_group32_residual128"
+  },
+  "policy_validation_all_ok": true,
+  "manifest_validation_all_ok": true,
+  "top_level_manifest": {
+    "exists": true,
+    "num_conditions": 16
+  },
+  "boot_id_check": {
+    "n_conditions_checked": 16,
+    "n_conditions_boot_id_matched": 16,
+    "unique_boot_ids_observed": [
+      "ec8055d0-1561-4d74-85e9-bc7479b67a14"
+    ],
+    "crossed_reboot": false,
+    "kernel_log_limitation": "journalctl kernel-event inspection is permission-blocked for this account in this environment; this check does NOT claim kernel logs are clean, only that boot_id was stable per-condition per available OS-level signal."
+  },
+  "canary_reuse_check": {
+    "trec_jsonl_valid_rows": 200,
+    "trec_jsonl_invalid_rows": 0,
+    "trec_jsonl_row_count_matches_no_duplication": true,
+    "trec_jsonl_mtime": "2026-08-19T14:34:35.830451+08:00",
+    "condition_manifest_start_time_full_run": "2026-08-19T15:21:38.407500+08:00",
+    "file_predates_full_run_start_evidence_of_reuse": true
+  },
+  "master_log_scan": {
+    "exists": true,
+    "log_path": "/home/kevin/Documents/KIVI_test/outputs/layer_sensitivity_pilot/full_pilot_20260819_152137.log",
+    "n_lines": 248,
+    "n_flagged_lines": 0
+  }
+}

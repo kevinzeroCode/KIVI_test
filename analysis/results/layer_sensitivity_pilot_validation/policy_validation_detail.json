@@ -1,0 +1,82 @@
+[
+  {
+    "condition_id": "layer00_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer00_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer04_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer04_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer09_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer09_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer13_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer13_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer18_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer18_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer22_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer22_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer27_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer27_value",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer31_key",
+    "ok": true,
+    "problems": []
+  },
+  {
+    "condition_id": "layer31_value",
+    "ok": true,
+    "problems": []
+  }
+]
