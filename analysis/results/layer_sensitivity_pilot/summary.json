@@ -1,0 +1,993 @@
+{
+  "timestamp": "2026-08-23T00:50:56.833302+08:00",
+  "seed": 42,
+  "bootstrap_iterations": 10000,
+  "pairing": {
+    "status": "PASS",
+    "configs_checked": [
+      "FP16",
+      "layer00_key",
+      "layer00_value",
+      "layer04_key",
+      "layer04_value",
+      "layer09_key",
+      "layer09_value",
+      "layer13_key",
+      "layer13_value",
+      "layer18_key",
+      "layer18_value",
+      "layer22_key",
+      "layer22_value",
+      "layer27_key",
+      "layer27_value",
+      "layer31_key",
+      "layer31_value"
+    ],
+    "tasks_checked": [
+      "trec",
+      "lcc",
+      "passage_retrieval_en",
+      "2wikimqa"
+    ]
+  },
+  "result_json_check": {
+    "checked": true,
+    "n_tasks_checked": 4,
+    "n_mismatches": 0
+  },
+  "baseline_scores": {
+    "trec": 66.5,
+    "lcc": 52.99,
+    "passage_retrieval_en": 30.5,
+    "2wikimqa": 24.45
+  },
+  "layer_sensitivities": {
+    "0": {
+      "signed_key_sensitivity": 0.9431501831501832,
+      "signed_value_sensitivity": -1.027375000000001,
+      "abs_key_sensitivity": 0.9431501831501832,
+      "abs_value_sensitivity": 1.058625000000001
+    },
+    "4": {
+      "signed_key_sensitivity": 0.262999999999999,
+      "signed_value_sensitivity": 0.08724999999999916,
+      "abs_key_sensitivity": 0.262999999999999,
+      "abs_value_sensitivity": 0.08724999999999916
+    },
+    "9": {
+      "signed_key_sensitivity": 0.11180921052631465,
+      "signed_value_sensitivity": 0.07924999999999915,
+      "abs_key_sensitivity": 0.13819078947368535,
+      "abs_value_sensitivity": 0.07924999999999915
+    },
+    "13": {
+      "signed_key_sensitivity": -0.20925883838383985,
+      "signed_value_sensitivity": 0.2580213585434157,
+      "abs_key_sensitivity": 0.45925883838383985,
+      "abs_value_sensitivity": 0.269978641456583
+    },
+    "18": {
+      "signed_key_sensitivity": -0.010826725905673129,
+      "signed_value_sensitivity": 0.19408088235294052,
+      "abs_key_sensitivity": 0.7778267259056726,
+      "abs_value_sensitivity": 0.19408088235294052
+    },
+    "22": {
+      "signed_key_sensitivity": 0.03376633986927935,
+      "signed_value_sensitivity": -0.04668452380952637,
+      "abs_key_sensitivity": 0.15623366013071838,
+      "abs_value_sensitivity": 0.04668452380952637
+    },
+    "27": {
+      "signed_key_sensitivity": 0.05012500000000042,
+      "signed_value_sensitivity": 0.08908333333333207,
+      "abs_key_sensitivity": 0.11887500000000006,
+      "abs_value_sensitivity": 0.08908333333333207
+    },
+    "31": {
+      "signed_key_sensitivity": 0.0011249999999991545,
+      "signed_value_sensitivity": 0.0235000000000003,
+      "abs_key_sensitivity": 0.0698749999999988,
+      "abs_value_sensitivity": 0.0235000000000003
+    }
+  },
+  "heterogeneity": {
+    "signed_key": {
+      "values": {
+        "0": 0.9431501831501832,
+        "4": 0.262999999999999,
+        "9": 0.11180921052631465,
+        "13": -0.20925883838383985,
+        "18": -0.010826725905673129,
+        "22": 0.03376633986927935,
+        "27": 0.05012500000000042,
+        "31": 0.0011249999999991545
+      },
+      "ranking_ascending": [
+        13,
+        18,
+        31,
+        22,
+        27,
+        9,
+        4,
+        0
+      ],
+      "min_layer": 13,
+      "min_value": -0.20925883838383985,
+      "max_layer": 0,
+      "max_value": 0.9431501831501832,
+      "range": 1.152409021534023,
+      "std_dev": 0.3472050340861004
+    },
+    "signed_value": {
+      "values": {
+        "0": -1.027375000000001,
+        "4": 0.08724999999999916,
+        "9": 0.07924999999999915,
+        "13": 0.2580213585434157,
+        "18": 0.19408088235294052,
+        "22": -0.04668452380952637,
+        "27": 0.08908333333333207,
+        "31": 0.0235000000000003
+      },
+      "ranking_ascending": [
+        0,
+        22,
+        31,
+        9,
+        4,
+        27,
+        18,
+        13
+      ],
+      "min_layer": 0,
+      "min_value": -1.027375000000001,
+      "max_layer": 13,
+      "max_value": 0.2580213585434157,
+      "range": 1.2853963585434167,
+      "std_dev": 0.40876244286225494
+    },
+    "abs_key": {
+      "values": {
+        "0": 0.9431501831501832,
+        "4": 0.262999999999999,
+        "9": 0.13819078947368535,
+        "13": 0.45925883838383985,
+        "18": 0.7778267259056726,
+        "22": 0.15623366013071838,
+        "27": 0.11887500000000006,
+        "31": 0.0698749999999988
+      },
+      "ranking_ascending": [
+        31,
+        27,
+        9,
+        22,
+        4,
+        13,
+        18,
+        0
+      ],
+      "min_layer": 31,
+      "min_value": 0.0698749999999988,
+      "max_layer": 0,
+      "max_value": 0.9431501831501832,
+      "range": 0.8732751831501844,
+      "std_dev": 0.33094436651061326
+    },
+    "abs_value": {
+      "values": {
+        "0": 1.058625000000001,
+        "4": 0.08724999999999916,
+        "9": 0.07924999999999915,
+        "13": 0.269978641456583,
+        "18": 0.19408088235294052,
+        "22": 0.04668452380952637,
+        "27": 0.08908333333333207,
+        "31": 0.0235000000000003
+      },
+      "ranking_ascending": [
+        31,
+        22,
+        9,
+        4,
+        27,
+        18,
+        13,
+        0
+      ],
+      "min_layer": 31,
+      "min_value": 0.0235000000000003,
+      "max_layer": 0,
+      "max_value": 1.058625000000001,
+      "range": 1.0351250000000007,
+      "std_dev": 0.3440735761894693
+    },
+    "abs_key_max_min_ratio": {
+      "ratio": 13.497677039716628,
+      "stable": true,
+      "note": null
+    },
+    "abs_value_max_min_ratio": {
+      "ratio": 45.047872340425,
+      "stable": false,
+      "note": "min absolute sensitivity (0.0235) is below 0.05 pp -- ratio is not a meaningful magnitude comparison"
+    }
+  },
+  "key_bootstrap": {
+    "KeySensitivity(L00)": {
+      "observed": 0.9431501831501805,
+      "bootstrap_mean": 0.9431254342490846,
+      "se": 0.23980283364071395,
+      "ci_low": 0.5153519688644671,
+      "ci_high": 1.45307518315018
+    },
+    "KeySensitivity(L04)": {
+      "observed": 0.2629999999999981,
+      "bootstrap_mean": 0.26312800000000003,
+      "se": 0.1292922287457425,
+      "ci_low": 0.01548749999999598,
+      "ci_high": 0.5199999999999891
+    },
+    "KeySensitivity(L09)": {
+      "observed": 0.11180921052631732,
+      "bootstrap_mean": 0.11366154736842109,
+      "se": 0.243736866126234,
+      "ci_low": -0.34478322368421066,
+      "ci_high": 0.6165075657894731
+    },
+    "KeySensitivity(L13)": {
+      "observed": -0.20925883838384607,
+      "bootstrap_mean": -0.21075296742424243,
+      "se": 0.33474653604241145,
+      "ci_low": -0.8428143308080823,
+      "ci_high": 0.45289422348484554
+    },
+    "KeySensitivity(L18)": {
+      "observed": -0.010826725905673129,
+      "bootstrap_mean": -0.011655502814858023,
+      "se": 0.48885035166655544,
+      "ci_low": -0.9772215438328432,
+      "ci_high": 0.9576418423230606
+    },
+    "KeySensitivity(L22)": {
+      "observed": 0.033766339869281126,
+      "bootstrap_mean": 0.033651451470588234,
+      "se": 0.11952369464400255,
+      "ci_low": -0.20552050653595388,
+      "ci_high": 0.2660402369281119
+    },
+    "KeySensitivity(L27)": {
+      "observed": 0.05012500000000131,
+      "bootstrap_mean": 0.04859845000000006,
+      "se": 0.09982290042867174,
+      "ci_low": -0.1511312500000004,
+      "ci_high": 0.24012812500000585
+    },
+    "KeySensitivity(L31)": {
+      "observed": 0.001125000000001819,
+      "bootstrap_mean": 0.00037600000000002394,
+      "se": 0.10037852161946922,
+      "ci_low": -0.2052562500000066,
+      "ci_high": 0.1887531249999989
+    }
+  },
+  "value_bootstrap": {
+    "ValueSensitivity(L00)": {
+      "observed": -1.0273750000000064,
+      "bootstrap_mean": -1.02835985,
+      "se": 0.19950293996964844,
+      "ci_low": -1.429874999999996,
+      "ci_high": -0.6554750000000038
+    },
+    "ValueSensitivity(L04)": {
+      "observed": 0.08724999999999739,
+      "bootstrap_mean": 0.08742257499999999,
+      "se": 0.07014353898061781,
+      "ci_low": -0.045999999999999555,
+      "ci_high": 0.2325000000000017
+    },
+    "ValueSensitivity(L09)": {
+      "observed": 0.07924999999999471,
+      "bootstrap_mean": 0.0799364250000001,
+      "se": 0.08773865344932234,
+      "ci_low": -0.09150000000000347,
+      "ci_high": 0.2530062499999999
+    },
+    "ValueSensitivity(L13)": {
+      "observed": 0.25802135854341657,
+      "bootstrap_mean": 0.2560962698529412,
+      "se": 0.23375024231496935,
+      "ci_low": -0.18499277836134878,
+      "ci_high": 0.7299424982493017
+    },
+    "ValueSensitivity(L18)": {
+      "observed": 0.1940808823529423,
+      "bootstrap_mean": 0.19441069485294124,
+      "se": 0.13407037843958625,
+      "ci_low": 0.0040808823529443925,
+      "ci_high": 0.5070145220588212
+    },
+    "ValueSensitivity(L22)": {
+      "observed": -0.04668452380952459,
+      "bootstrap_mean": -0.04698514999999999,
+      "se": 0.08571045598840199,
+      "ci_low": -0.2272514880952361,
+      "ci_high": 0.11187976190475972
+    },
+    "ValueSensitivity(L27)": {
+      "observed": 0.08908333333333474,
+      "bootstrap_mean": 0.08712962499999995,
+      "se": 0.11374364724655778,
+      "ci_low": -0.12599999999999784,
+      "ci_high": 0.3281666666666682
+    },
+    "ValueSensitivity(L31)": {
+      "observed": 0.023499999999998522,
+      "bootstrap_mean": 0.024332000000000034,
+      "se": 0.06112897595388068,
+      "ci_low": -0.09051250000000549,
+      "ci_high": 0.15199999999999392
+    }
+  },
+  "axis_difference_bootstrap": {
+    "AxisDifference(L00)": {
+      "observed": 1.9705251831501869,
+      "bootstrap_mean": 1.9714852842490844,
+      "se": 0.30248389454604235,
+      "ci_low": 1.4123693795787522,
+      "ci_high": 2.5822194940476266
+    },
+    "AxisDifference(L04)": {
+      "observed": 0.17575000000000074,
+      "bootstrap_mean": 0.17570542500000003,
+      "se": 0.13930877767704788,
+      "ci_low": -0.0929999999999966,
+      "ci_high": 0.45375624999999936
+    },
+    "AxisDifference(L09)": {
+      "observed": 0.0325592105263226,
+      "bootstrap_mean": 0.03372512236842097,
+      "se": 0.24356032131943772,
+      "ci_low": -0.4248845394736799,
+      "ci_high": 0.5299154605263168
+    },
+    "AxisDifference(L13)": {
+      "observed": -0.46728019692726264,
+      "bootstrap_mean": -0.4668492372771836,
+      "se": 0.36075052425321,
+      "ci_low": -1.1690493824802615,
+      "ci_high": 0.23901116708047057
+    },
+    "AxisDifference(L18)": {
+      "observed": -0.20490760825861543,
+      "bootstrap_mean": -0.20606619766779927,
+      "se": 0.46854209454534546,
+      "ci_low": -1.140779919007074,
+      "ci_high": 0.7198561533764211
+    },
+    "AxisDifference(L22)": {
+      "observed": 0.08045086367880572,
+      "bootstrap_mean": 0.08063660147058822,
+      "se": 0.09827753952087238,
+      "ci_low": -0.10718669467787798,
+      "ci_high": 0.27877663690476256
+    },
+    "AxisDifference(L27)": {
+      "observed": -0.03895833333333343,
+      "bootstrap_mean": -0.0385311749999999,
+      "se": 0.10296112867387831,
+      "ci_low": -0.26183333333333536,
+      "ci_high": 0.14087812500000782
+    },
+    "AxisDifference(L31)": {
+      "observed": -0.022374999999996703,
+      "bootstrap_mean": -0.023956000000000005,
+      "se": 0.09931802569157687,
+      "ci_low": -0.23012812499999402,
+      "ci_high": 0.15525312500000238
+    }
+  },
+  "signed_range_contrast_bootstrap": {
+    "SignedKeyRangeContrast_L13_minus_L00": {
+      "observed": -1.1524090215340266,
+      "bootstrap_mean": -1.1538784016733268,
+      "se": 0.4069766454252199,
+      "ci_low": -1.949878294622045,
+      "ci_high": -0.35844531232656823
+    },
+    "SignedValueRangeContrast_L00_minus_L13": {
+      "observed": -1.285396358543423,
+      "bootstrap_mean": -1.2844561198529412,
+      "se": 0.29685680354152916,
+      "ci_low": -1.883933307072829,
+      "ci_high": -0.7181827380952339
+    }
+  },
+  "signed_range_layers": {
+    "most_harmed_key_layer": 13,
+    "most_improved_key_layer": 0,
+    "most_harmed_value_layer": 0,
+    "most_improved_value_layer": 13
+  },
+  "task_dependence_key": {
+    "table": {
+      "0": {
+        "trec": 0.0,
+        "lcc": 2.6400000000000006,
+        "passage_retrieval_en": 1.0,
+        "2wikimqa": 0.13260073260073213
+      },
+      "4": {
+        "trec": 0.0,
+        "lcc": 1.0019999999999953,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.05000000000000071
+      },
+      "9": {
+        "trec": 0.0,
+        "lcc": -0.010000000000005116,
+        "passage_retrieval_en": 0.5,
+        "2wikimqa": -0.04276315789473628
+      },
+      "13": {
+        "trec": 0.0,
+        "lcc": -1.196000000000005,
+        "passage_retrieval_en": 0.5,
+        "2wikimqa": -0.14103535353535435
+      },
+      "18": {
+        "trec": -0.5,
+        "lcc": 0.5339999999999989,
+        "passage_retrieval_en": 1.0,
+        "2wikimqa": -1.0773069036226914
+      },
+      "22": {
+        "trec": 0.0,
+        "lcc": 0.37999999999999545,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": -0.24493464052287806
+      },
+      "27": {
+        "trec": 0.0,
+        "lcc": 0.33800000000000097,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": -0.1374999999999993
+      },
+      "31": {
+        "trec": 0.0,
+        "lcc": 0.1419999999999959,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": -0.1374999999999993
+      }
+    },
+    "per_task_summary": {
+      "trec": {
+        "most_harmed_layer": 18,
+        "most_harmed_value": -0.5,
+        "least_harmed_or_most_improved_layer": 31,
+        "least_harmed_or_most_improved_value": 0.0,
+        "range": 0.5,
+        "ranking_ascending": [
+          18,
+          0,
+          4,
+          9,
+          13,
+          22,
+          27,
+          31
+        ]
+      },
+      "lcc": {
+        "most_harmed_layer": 13,
+        "most_harmed_value": -1.196000000000005,
+        "least_harmed_or_most_improved_layer": 0,
+        "least_harmed_or_most_improved_value": 2.6400000000000006,
+        "range": 3.8360000000000056,
+        "ranking_ascending": [
+          13,
+          9,
+          31,
+          27,
+          22,
+          18,
+          4,
+          0
+        ]
+      },
+      "passage_retrieval_en": {
+        "most_harmed_layer": 4,
+        "most_harmed_value": 0.0,
+        "least_harmed_or_most_improved_layer": 18,
+        "least_harmed_or_most_improved_value": 1.0,
+        "range": 1.0,
+        "ranking_ascending": [
+          4,
+          22,
+          27,
+          31,
+          9,
+          13,
+          0,
+          18
+        ]
+      },
+      "2wikimqa": {
+        "most_harmed_layer": 18,
+        "most_harmed_value": -1.0773069036226914,
+        "least_harmed_or_most_improved_layer": 0,
+        "least_harmed_or_most_improved_value": 0.13260073260073213,
+        "range": 1.2099076362234236,
+        "ranking_ascending": [
+          18,
+          22,
+          13,
+          27,
+          31,
+          9,
+          4,
+          0
+        ]
+      }
+    },
+    "pairwise_spearman": {
+      "trec_vs_lcc": -0.24743582965269675,
+      "trec_vs_passage_retrieval_en": -0.5345224838248487,
+      "trec_vs_2wikimqa": 0.5808178695515156,
+      "lcc_vs_passage_retrieval_en": 0.18002057495577392,
+      "lcc_vs_2wikimqa": 0.3233590907165799,
+      "passage_retrieval_en_vs_2wikimqa": 0.0
+    }
+  },
+  "task_dependence_value": {
+    "table": {
+      "0": {
+        "trec": 0.0,
+        "lcc": -4.172000000000004,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.0625
+      },
+      "4": {
+        "trec": 0.0,
+        "lcc": 0.22399999999999665,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.125
+      },
+      "9": {
+        "trec": 0.0,
+        "lcc": 0.2919999999999945,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.02500000000000213
+      },
+      "13": {
+        "trec": 0.0,
+        "lcc": 0.5559999999999974,
+        "passage_retrieval_en": 0.5,
+        "2wikimqa": -0.023914565826334666
+      },
+      "18": {
+        "trec": 0.0,
+        "lcc": 0.22999999999999687,
+        "passage_retrieval_en": 0.5,
+        "2wikimqa": 0.04632352941176521
+      },
+      "22": {
+        "trec": 0.0,
+        "lcc": -0.0040000000000048885,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": -0.18273809523810058
+      },
+      "27": {
+        "trec": 0.0,
+        "lcc": 0.09799999999999898,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.2583333333333293
+      },
+      "31": {
+        "trec": 0.0,
+        "lcc": 0.0940000000000012,
+        "passage_retrieval_en": 0.0,
+        "2wikimqa": 0.0
+      }
+    },
+    "per_task_summary": {
+      "trec": {
+        "most_harmed_layer": 0,
+        "most_harmed_value": 0.0,
+        "least_harmed_or_most_improved_layer": 31,
+        "least_harmed_or_most_improved_value": 0.0,
+        "range": 0.0,
+        "ranking_ascending": [
+          0,
+          4,
+          9,
+          13,
+          18,
+          22,
+          27,
+          31
+        ]
+      },
+      "lcc": {
+        "most_harmed_layer": 0,
+        "most_harmed_value": -4.172000000000004,
+        "least_harmed_or_most_improved_layer": 13,
+        "least_harmed_or_most_improved_value": 0.5559999999999974,
+        "range": 4.7280000000000015,
+        "ranking_ascending": [
+          0,
+          22,
+          31,
+          27,
+          4,
+          18,
+          9,
+          13
+        ]
+      },
+      "passage_retrieval_en": {
+        "most_harmed_layer": 0,
+        "most_harmed_value": 0.0,
+        "least_harmed_or_most_improved_layer": 18,
+        "least_harmed_or_most_improved_value": 0.5,
+        "range": 0.5,
+        "ranking_ascending": [
+          0,
+          4,
+          9,
+          22,
+          27,
+          31,
+          13,
+          18
+        ]
+      },
+      "2wikimqa": {
+        "most_harmed_layer": 22,
+        "most_harmed_value": -0.18273809523810058,
+        "least_harmed_or_most_improved_layer": 27,
+        "least_harmed_or_most_improved_value": 0.2583333333333293,
+        "range": 0.4410714285714299,
+        "ranking_ascending": [
+          22,
+          13,
+          31,
+          9,
+          18,
+          0,
+          4,
+          27
+        ]
+      }
+    },
+    "pairwise_spearman": {
+      "trec_vs_lcc": null,
+      "trec_vs_passage_retrieval_en": null,
+      "trec_vs_2wikimqa": null,
+      "lcc_vs_passage_retrieval_en": 0.629940788348712,
+      "lcc_vs_2wikimqa": -0.09523809523809526,
+      "passage_retrieval_en_vs_2wikimqa": -0.25197631533948484
+    }
+  },
+  "depth_pattern": {
+    "spearman_layer_idx_vs_signed_key": -0.5952380952380953,
+    "spearman_layer_idx_vs_signed_value": 0.14285714285714288,
+    "spearman_layer_idx_vs_abs_key": -0.7142857142857144,
+    "spearman_layer_idx_vs_abs_value": -0.5714285714285715,
+    "bucket_means_signed_key": {
+      "early_0_4_9": 0.43931979789216563,
+      "mid_13_18_22": -0.062106408140077875,
+      "late_27_31": 0.025624999999999787
+    },
+    "bucket_means_signed_value": {
+      "early_0_4_9": -0.28695833333333426,
+      "mid_13_18_22": 0.1351392390289433,
+      "late_27_31": 0.056291666666666185
+    },
+    "bucket_means_abs_key": {
+      "early_0_4_9": 0.4481136575412892,
+      "mid_13_18_22": 0.4644397414734103,
+      "late_27_31": 0.09437499999999943
+    },
+    "bucket_means_abs_value": {
+      "early_0_4_9": 0.40837499999999977,
+      "mid_13_18_22": 0.17024801587301663,
+      "late_27_31": 0.056291666666666185
+    },
+    "note": "Descriptive only -- 8 sampled layers out of 32 cannot establish a smooth depth trend."
+  },
+  "key_value_relationship": {
+    "spearman_signed_key_vs_signed_value": -0.6190476190476191,
+    "spearman_abs_key_vs_abs_value": 0.8095238095238096,
+    "median_split_quadrants": {
+      "definition": "exploratory: layer classified high/low per axis by whether its AbsKeySensitivity/AbsValueSensitivity is >= the median across the 8 pilot layers",
+      "median_abs_key_sensitivity": 0.2096168300653587,
+      "median_abs_value_sensitivity": 0.08816666666666562,
+      "layer_labels": {
+        "0": "high_key_high_value",
+        "4": "high_key_low_value",
+        "9": "low_key_low_value",
+        "13": "high_key_high_value",
+        "18": "high_key_high_value",
+        "22": "low_key_low_value",
+        "27": "low_key_high_value",
+        "31": "low_key_low_value"
+      }
+    }
+  },
+  "loto_per_layer": {
+    "L00_key": {
+      "full_4task_mean": 0.9431501831501832,
+      "loto_values": {
+        "trec": 1.2575335775335776,
+        "lcc": 0.37753357753357736,
+        "passage_retrieval_en": 0.9242002442002443,
+        "2wikimqa": 1.2133333333333336
+      },
+      "min": 0.37753357753357736,
+      "min_task": "lcc",
+      "max": 1.2575335775335776,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L00_value": {
+      "full_4task_mean": -1.027375000000001,
+      "loto_values": {
+        "trec": -1.3698333333333348,
+        "lcc": 0.020833333333333332,
+        "passage_retrieval_en": -1.3698333333333348,
+        "2wikimqa": -1.390666666666668
+      },
+      "min": -1.390666666666668,
+      "min_task": "2wikimqa",
+      "max": 0.020833333333333332,
+      "max_task": "lcc",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "L04_key": {
+      "full_4task_mean": 0.262999999999999,
+      "loto_values": {
+        "trec": 0.35066666666666535,
+        "lcc": 0.016666666666666902,
+        "passage_retrieval_en": 0.35066666666666535,
+        "2wikimqa": 0.33399999999999846
+      },
+      "min": 0.016666666666666902,
+      "min_task": "lcc",
+      "max": 0.35066666666666535,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L04_value": {
+      "full_4task_mean": 0.08724999999999916,
+      "loto_values": {
+        "trec": 0.11633333333333222,
+        "lcc": 0.041666666666666664,
+        "passage_retrieval_en": 0.11633333333333222,
+        "2wikimqa": 0.07466666666666555
+      },
+      "min": 0.041666666666666664,
+      "min_task": "lcc",
+      "max": 0.11633333333333222,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L09_key": {
+      "full_4task_mean": 0.11180921052631465,
+      "loto_values": {
+        "trec": 0.14907894736841953,
+        "lcc": 0.15241228070175458,
+        "passage_retrieval_en": -0.017587719298247134,
+        "2wikimqa": 0.16333333333333164
+      },
+      "min": -0.017587719298247134,
+      "min_task": "passage_retrieval_en",
+      "max": 0.16333333333333164,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "passage_retrieval_en"
+      ]
+    },
+    "L09_value": {
+      "full_4task_mean": 0.07924999999999915,
+      "loto_values": {
+        "trec": 0.10566666666666553,
+        "lcc": 0.008333333333334044,
+        "passage_retrieval_en": 0.10566666666666553,
+        "2wikimqa": 0.0973333333333315
+      },
+      "min": 0.008333333333334044,
+      "min_task": "lcc",
+      "max": 0.10566666666666553,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L13_key": {
+      "full_4task_mean": -0.20925883838383985,
+      "loto_values": {
+        "trec": -0.2790117845117865,
+        "lcc": 0.11965488215488189,
+        "passage_retrieval_en": -0.4456784511784531,
+        "2wikimqa": -0.23200000000000168
+      },
+      "min": -0.4456784511784531,
+      "min_task": "passage_retrieval_en",
+      "max": 0.11965488215488189,
+      "max_task": "lcc",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "L13_value": {
+      "full_4task_mean": 0.2580213585434157,
+      "loto_values": {
+        "trec": 0.34402847805788755,
+        "lcc": 0.15869514472455512,
+        "passage_retrieval_en": 0.1773618113912209,
+        "2wikimqa": 0.35199999999999915
+      },
+      "min": 0.15869514472455512,
+      "min_task": "lcc",
+      "max": 0.35199999999999915,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": []
+    },
+    "L18_key": {
+      "full_4task_mean": -0.010826725905673129,
+      "loto_values": {
+        "trec": 0.15223103212576916,
+        "lcc": -0.19243563454089715,
+        "passage_retrieval_en": -0.34776896787423084,
+        "2wikimqa": 0.3446666666666663
+      },
+      "min": -0.34776896787423084,
+      "min_task": "passage_retrieval_en",
+      "max": 0.3446666666666663,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "trec",
+        "2wikimqa"
+      ]
+    },
+    "L18_value": {
+      "full_4task_mean": 0.19408088235294052,
+      "loto_values": {
+        "trec": 0.2587745098039207,
+        "lcc": 0.18210784313725506,
+        "passage_retrieval_en": 0.09210784313725402,
+        "2wikimqa": 0.2433333333333323
+      },
+      "min": 0.09210784313725402,
+      "min_task": "passage_retrieval_en",
+      "max": 0.2587745098039207,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L22_key": {
+      "full_4task_mean": 0.03376633986927935,
+      "loto_values": {
+        "trec": 0.04502178649237246,
+        "lcc": -0.08164488017429268,
+        "passage_retrieval_en": 0.04502178649237246,
+        "2wikimqa": 0.12666666666666515
+      },
+      "min": -0.08164488017429268,
+      "min_task": "lcc",
+      "max": 0.12666666666666515,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "L22_value": {
+      "full_4task_mean": -0.04668452380952637,
+      "loto_values": {
+        "trec": -0.06224603174603516,
+        "lcc": -0.060912698412700195,
+        "passage_retrieval_en": -0.06224603174603516,
+        "2wikimqa": -0.0013333333333349628
+      },
+      "min": -0.06224603174603516,
+      "min_task": "trec",
+      "max": -0.0013333333333349628,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": []
+    },
+    "L27_key": {
+      "full_4task_mean": 0.05012500000000042,
+      "loto_values": {
+        "trec": 0.0668333333333339,
+        "lcc": -0.045833333333333094,
+        "passage_retrieval_en": 0.0668333333333339,
+        "2wikimqa": 0.11266666666666698
+      },
+      "min": -0.045833333333333094,
+      "min_task": "lcc",
+      "max": 0.11266666666666698,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "L27_value": {
+      "full_4task_mean": 0.08908333333333207,
+      "loto_values": {
+        "trec": 0.1187777777777761,
+        "lcc": 0.08611111111110976,
+        "passage_retrieval_en": 0.1187777777777761,
+        "2wikimqa": 0.03266666666666632
+      },
+      "min": 0.03266666666666632,
+      "min_task": "2wikimqa",
+      "max": 0.1187777777777761,
+      "max_task": "trec",
+      "sign_changed_when_removing": []
+    },
+    "L31_key": {
+      "full_4task_mean": 0.0011249999999991545,
+      "loto_values": {
+        "trec": 0.0014999999999988727,
+        "lcc": -0.045833333333333094,
+        "passage_retrieval_en": 0.0014999999999988727,
+        "2wikimqa": 0.04733333333333197
+      },
+      "min": -0.045833333333333094,
+      "min_task": "lcc",
+      "max": 0.04733333333333197,
+      "max_task": "2wikimqa",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    },
+    "L31_value": {
+      "full_4task_mean": 0.0235000000000003,
+      "loto_values": {
+        "trec": 0.031333333333333734,
+        "lcc": 0.0,
+        "passage_retrieval_en": 0.031333333333333734,
+        "2wikimqa": 0.031333333333333734
+      },
+      "min": 0.0,
+      "min_task": "lcc",
+      "max": 0.031333333333333734,
+      "max_task": "trec",
+      "sign_changed_when_removing": [
+        "lcc"
+      ]
+    }
+  },
+  "loto_signed_range_contrasts": {
+    "key": {
+      "full_4task_mean": -1.152409021534023,
+      "loto_values": {
+        "trec": -1.536545362045364,
+        "lcc": -0.2578786953786955,
+        "passage_retrieval_en": -1.3698786953786974,
+        "2wikimqa": -1.4453333333333351
+      },
+      "min": -1.536545362045364,
+      "min_task": "trec",
+      "max": -0.2578786953786955,
+      "max_task": "lcc",
+      "sign_changed_when_removing": []
+    },
+    "value": {
+      "full_4task_mean": -1.2853963585434167,
+      "loto_values": {
+        "trec": -1.7138618113912223,
+        "lcc": -0.13786181139122178,
+        "passage_retrieval_en": -1.5471951447245555,
+        "2wikimqa": -1.7426666666666673
+      },
+      "min": -1.7426666666666673,
+      "min_task": "2wikimqa",
+      "max": -0.13786181139122178,
+      "max_task": "lcc",
+      "sign_changed_when_removing": []
+    }
+  }
+}

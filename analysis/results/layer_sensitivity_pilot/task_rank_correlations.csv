@@ -1,0 +1,13 @@
+axis,task_pair,spearman_rho
+key,trec_vs_lcc,-0.24743582965269675
+key,trec_vs_passage_retrieval_en,-0.5345224838248487
+key,trec_vs_2wikimqa,0.5808178695515156
+key,lcc_vs_passage_retrieval_en,0.18002057495577392
+key,lcc_vs_2wikimqa,0.3233590907165799
+key,passage_retrieval_en_vs_2wikimqa,0.0
+value,trec_vs_lcc,
+value,trec_vs_passage_retrieval_en,
+value,trec_vs_2wikimqa,
+value,lcc_vs_passage_retrieval_en,0.629940788348712
+value,lcc_vs_2wikimqa,-0.09523809523809526
+value,passage_retrieval_en_vs_2wikimqa,-0.25197631533948484
