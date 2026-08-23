@@ -202,6 +202,7 @@ def main():
     from datasets import load_dataset
 
     import pred_long_bench as plb
+    from utils.generation_semantics import NO_BUILD_CHAT_DATASETS, resolve_generate_kwargs
     from utils.jsonl_integrity import inspect_jsonl
     from utils.layer_policy import canonical_policy_dict, load_and_resolve, policy_hash
 
@@ -324,15 +325,13 @@ def main():
                         tokenizer.decode(tokenized_prompt[:half], skip_special_tokens=True)
                         + tokenizer.decode(tokenized_prompt[-half:], skip_special_tokens=True)
                     )
-                if args.dataset not in ["trec", "triviaqa", "samsum", "lsht", "lcc", "repobench-p"]:
+                if args.dataset not in NO_BUILD_CHAT_DATASETS:
                     prompt = plb.build_chat(tokenizer, prompt, model_short_name)
                 inp = tokenizer(prompt, truncation=False, return_tensors="pt").to(device)
                 context_length = inp.input_ids.shape[-1]
+                generate_kwargs = resolve_generate_kwargs(args.dataset, tokenizer, context_length, max_gen)
                 with torch.no_grad():
-                    output = model.generate(
-                        **inp, max_new_tokens=max_gen, num_beams=1, do_sample=False,
-                        temperature=1.0, top_p=1.0,
-                    )[0]
+                    output = model.generate(**inp, **generate_kwargs)[0]
                 pred = tokenizer.decode(output[context_length:], skip_special_tokens=True)
                 pred = plb.post_process(pred, model_short_name)
                 row = {"pred": pred, "answers": json_obj["answers"], "all_classes": json_obj["all_classes"], "length": json_obj["length"]}
