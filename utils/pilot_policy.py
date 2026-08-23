@@ -8,13 +8,32 @@ the corresponding docs/report):
   - Every condition: all layers K16/V16 except the probed layer, which is
     K2/V16 (key axis) or K16/V2 (value axis).
   - 4 screening tasks, full LongBench test-split counts (no sub-sampling).
+
+Task-count design (fixed after the Stage-F0 dry-run bug): this module
+deliberately separates two distinct concepts that select_task_counts()
+previously conflated into a single 4-task dict:
+  - DEFAULT_PILOT_TASK_COUNTS: the Stage-D screening default (trec, lcc,
+    passage_retrieval_en, 2wikimqa) -- what a bare `--tasks`-less invocation
+    of scripts/run_layer_sensitivity_pilot.py runs. Must never change
+    silently; the completed Stage-D experiment depends on this default.
+  - SUPPORTED_TASK_COUNTS: every LongBench task this pilot infrastructure is
+    *allowed* to run when explicitly requested via --tasks (e.g. Stage F0's
+    multifieldqa_en/samsum), reusing Phase-1's already-validated
+    EXPECTED_TASK_COUNTS (analysis/analyze_kv_ablation.py) rather than
+    re-deriving or inventing sample counts here.
 """
 import hashlib
 import json
+import sys
 from collections import OrderedDict
 from pathlib import Path
 
-from utils.layer_policy import (
+REPO_ROOT = Path(__file__).resolve().parent.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from analysis.analyze_kv_ablation import EXPECTED_TASK_COUNTS as SUPPORTED_TASK_COUNTS  # noqa: E402
+from utils.layer_policy import (  # noqa: E402
     LayerPolicyError,
     load_and_resolve,
     policy_hash,
@@ -26,7 +45,7 @@ EXPECTED_NUM_LAYERS = 32  # LongChat-7b-v1.5-32k, confirmed from its HF config.j
 PILOT_LAYERS = (0, 4, 9, 13, 18, 22, 27, 31)
 PILOT_AXES = ("key", "value")  # per-layer order: key probe before value probe
 
-PILOT_TASK_COUNTS = OrderedDict(
+DEFAULT_PILOT_TASK_COUNTS = OrderedDict(
     [
         ("trec", 200),
         ("lcc", 500),
@@ -34,6 +53,10 @@ PILOT_TASK_COUNTS = OrderedDict(
         ("2wikimqa", 200),
     ]
 )
+# Backward-compatible alias: every existing caller of PILOT_TASK_COUNTS
+# (the completed Stage-D analysis/validation scripts) only ever means the
+# Stage-D default 4 tasks -- keep it pointing at exactly that, unchanged.
+PILOT_TASK_COUNTS = DEFAULT_PILOT_TASK_COUNTS
 PILOT_TASKS = list(PILOT_TASK_COUNTS)
 
 AXIS_BITS = {"key": {"k_bits": 2, "v_bits": 16}, "value": {"k_bits": 16, "v_bits": 2}}
@@ -165,15 +188,23 @@ def total_example_count(task_counts=PILOT_TASK_COUNTS, num_conditions=16):
     return num_conditions * sum(task_counts.values())
 
 
-def select_task_counts(task_names, all_task_counts=PILOT_TASK_COUNTS):
-    """Validates a requested task-name subset (e.g. from --tasks) against
-    the full pilot task set and returns an OrderedDict restricted to those
-    tasks, in the canonical PILOT_TASK_COUNTS order (not the caller's
+def select_task_counts(task_names, supported_task_counts=SUPPORTED_TASK_COUNTS, default_task_counts=DEFAULT_PILOT_TASK_COUNTS):
+    """task_names=None (or empty/falsy) preserves the Stage-D default
+    exactly -- returns default_task_counts unchanged, never validated
+    against anything (there is nothing to validate).
+
+    An explicit task_names list is validated against supported_task_counts
+    (every LongBench task this pilot is allowed to run, not just the 4
+    Stage-D defaults) and returned as an OrderedDict restricted to those
+    tasks, in supported_task_counts' canonical order (not the caller's
     argument order, so downstream iteration/printing stays deterministic).
-    Fails closed on any unrecognized task name."""
-    unknown = [t for t in task_names if t not in all_task_counts]
+    Fails closed on any task name not present in supported_task_counts.
+    """
+    if not task_names:
+        return OrderedDict(default_task_counts)
+    unknown = [t for t in task_names if t not in supported_task_counts]
     if unknown:
         raise PilotPolicyError(
-            f"Unknown task(s) {unknown}; must be a subset of {list(all_task_counts)}"
+            f"Unknown task(s) {unknown}; must be a subset of {list(supported_task_counts)}"
         )
-    return OrderedDict((t, all_task_counts[t]) for t in all_task_counts if t in set(task_names))
+    return OrderedDict((t, supported_task_counts[t]) for t in supported_task_counts if t in set(task_names))

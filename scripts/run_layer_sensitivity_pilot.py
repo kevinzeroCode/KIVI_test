@@ -613,7 +613,7 @@ def parse_args(argv=None):
     p.add_argument("--cache_dir", default="./cached_models")
     p.add_argument("--layers", type=int, nargs="+", default=list(PILOT_LAYERS))
     p.add_argument("--axes", nargs="+", default=list(PILOT_AXES), choices=list(PILOT_AXES))
-    p.add_argument("--tasks", nargs="+", default=list(PILOT_TASK_COUNTS))
+    p.add_argument("--tasks", nargs="+", default=None, help="Defaults to the Stage-D 4-task screening set (trec, lcc, passage_retrieval_en, 2wikimqa). Any LongBench task in utils.pilot_policy.SUPPORTED_TASK_COUNTS may be requested explicitly.")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--resume", action="store_true", help="Explicit acknowledgement that existing condition output dirs may be resumed (default behavior already resumes safely; this flag only affects messaging).")
     p.add_argument("--device", type=int, default=0)

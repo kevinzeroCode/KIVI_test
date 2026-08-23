@@ -20,10 +20,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "scripts"))
 
 from utils.pilot_policy import (  # noqa: E402
+    DEFAULT_PILOT_TASK_COUNTS,
     PILOT_AXES,
     PILOT_LAYERS,
     PILOT_TASK_COUNTS,
     PilotPolicyError,
+    SUPPORTED_TASK_COUNTS,
     all_pilot_specs,
     discover_and_validate_pilot_policies,
     output_dir_name,
@@ -174,9 +176,11 @@ class TestTasksFlagIsRespected(unittest.TestCase):
         self.assertEqual(dict(result), {"trec": 200})
 
     def test_select_task_counts_preserves_canonical_order_not_arg_order(self):
-        # Requested out of order; result must follow PILOT_TASK_COUNTS order.
-        result = select_task_counts(["2wikimqa", "trec"])
-        self.assertEqual(list(result), ["trec", "2wikimqa"])
+        # Requested out of order; result must follow SUPPORTED_TASK_COUNTS'
+        # canonical (Phase-1 EXPECTED_TASK_COUNTS) order, not the caller's
+        # argument order. In that order 2wikimqa precedes trec.
+        result = select_task_counts(["trec", "2wikimqa"])
+        self.assertEqual(list(result), ["2wikimqa", "trec"])
 
     def test_select_task_counts_rejects_unknown_task(self):
         with self.assertRaises(PilotPolicyError):
@@ -221,10 +225,11 @@ class TestTasksFlagIsRespected(unittest.TestCase):
                 pass
 
             manifest = driver.build_initial_pilot_manifest(conditions, _Args(), select_task_counts(["trec", "lcc"]))
-            self.assertEqual(manifest["tasks"], ["trec", "lcc"])
+            # SUPPORTED_TASK_COUNTS' canonical order puts lcc before trec.
+            self.assertEqual(manifest["tasks"], ["lcc", "trec"])
             self.assertEqual(manifest["total_examples"], 16 * (200 + 500))
             for c in manifest["conditions"]:
-                self.assertEqual(c["tasks"], ["trec", "lcc"])
+                self.assertEqual(c["tasks"], ["lcc", "trec"])
 
 
 # --- resume semantics ---------------------------------------------------------
@@ -483,6 +488,85 @@ class TestNanInfInstrumentation(unittest.TestCase):
         # failed before the hook was ever registered.
         self.assertIn("hook_handle = None", source)
         self.assertIn("if hook_handle is not None", source)
+
+
+# --- default-vs-supported task scope (Stage F0 dry-run bug: select_task_counts
+# validated an explicit --tasks selection against only the 4 Stage-D default
+# tasks, rejecting any other real LongBench task such as multifieldqa_en or
+# samsum) ---------------------------------------------------------------------
+
+class TestDefaultVsSupportedTaskScope(unittest.TestCase):
+    def test_A_default_stage_d_selection_unchanged_via_none(self):
+        result = select_task_counts(None)
+        self.assertEqual(dict(result), {"trec": 200, "lcc": 500, "passage_retrieval_en": 200, "2wikimqa": 200})
+        self.assertEqual(dict(result), dict(DEFAULT_PILOT_TASK_COUNTS))
+
+    def test_A_default_stage_d_selection_unchanged_via_empty_list(self):
+        result = select_task_counts([])
+        self.assertEqual(dict(result), dict(DEFAULT_PILOT_TASK_COUNTS))
+
+    def test_B_explicit_f0_task_selection_accepted(self):
+        result = select_task_counts(["multifieldqa_en", "samsum"])
+        self.assertEqual(dict(result), {"multifieldqa_en": 150, "samsum": 200})
+
+    def test_C_multifieldqa_en_exact_count_150(self):
+        self.assertEqual(SUPPORTED_TASK_COUNTS["multifieldqa_en"], 150)
+        result = select_task_counts(["multifieldqa_en"])
+        self.assertEqual(result["multifieldqa_en"], 150)
+
+    def test_D_samsum_exact_count_200(self):
+        self.assertEqual(SUPPORTED_TASK_COUNTS["samsum"], 200)
+        result = select_task_counts(["samsum"])
+        self.assertEqual(result["samsum"], 200)
+
+    def test_E_unknown_task_still_raises(self):
+        with self.assertRaises(PilotPolicyError):
+            select_task_counts(["multifieldqa_en", "not_a_real_task"])
+
+    def test_supported_task_counts_is_the_authoritative_phase1_mapping(self):
+        # Must be reused, not re-derived: same object/values as Phase-1's
+        # already-validated EXPECTED_TASK_COUNTS.
+        from analysis.analyze_kv_ablation import EXPECTED_TASK_COUNTS
+
+        self.assertEqual(dict(SUPPORTED_TASK_COUNTS), dict(EXPECTED_TASK_COUNTS))
+        self.assertEqual(len(SUPPORTED_TASK_COUNTS), 15)
+
+    def test_F_f0_dry_run_scope_via_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [
+                "--layers", "0", "--axes", "key", "value",
+                "--tasks", "multifieldqa_en", "samsum",
+                "--policies-dir", os.path.join(tmp, "policies"),
+                "--output-root", os.path.join(tmp, "f0"),
+                "--dry-run",
+            ]
+            with mock.patch.object(sys, "argv", ["run_layer_sensitivity_pilot.py"] + argv):
+                with mock.patch("builtins.print") as mock_print:
+                    rc = driver.main()
+            self.assertEqual(rc, 0)
+            printed = "\n".join(str(c.args[0]) for c in mock_print.call_args_list)
+            self.assertIn("Pilot conditions: 2", printed)
+            self.assertIn("Dataset evaluations: 2 conditions x 2 tasks = 4", printed)
+            self.assertIn("Total examples: 2 x 350 = 700", printed)
+            for excluded in ("trec", "lcc", "passage_retrieval_en", "2wikimqa"):
+                self.assertNotIn(excluded, printed)
+
+    def test_G_stage_d_dry_run_totals_unchanged_via_main(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = [
+                "--policies-dir", os.path.join(tmp, "policies"),
+                "--output-root", os.path.join(tmp, "out"),
+                "--dry-run",
+            ]
+            with mock.patch.object(sys, "argv", ["run_layer_sensitivity_pilot.py"] + argv):
+                with mock.patch("builtins.print") as mock_print:
+                    rc = driver.main()
+            self.assertEqual(rc, 0)
+            printed = "\n".join(str(c.args[0]) for c in mock_print.call_args_list)
+            self.assertIn("Pilot conditions: 16", printed)
+            self.assertIn("Dataset evaluations: 16 conditions x 4 tasks = 64", printed)
+            self.assertIn("Total examples: 16 x 1100 = 17600", printed)
+            self.assertIn("Selected tasks: ['trec', 'lcc', 'passage_retrieval_en', '2wikimqa']", printed)
 
 
 # --- resume dry-run report (Part E: dry-run must prove a completed
