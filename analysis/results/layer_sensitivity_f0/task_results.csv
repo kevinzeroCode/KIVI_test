@@ -1,0 +1,7 @@
+task,n_samples,baseline_score,key_score,value_score,key_delta,value_delta,axis_difference
+trec,200,66.5,66.5,66.5,0.0,0.0,0.0
+lcc,500,52.99,55.63,48.82,2.64,-4.172,6.812
+passage_retrieval_en,200,30.5,31.5,30.5,1.0,0.0,1.0
+2wikimqa,200,24.45,24.58,24.51,0.1326,0.0625,0.0701
+multifieldqa_en,150,43.42,43.31,43.44,-0.1072,0.0249,-0.1322
+samsum,200,40.8,40.87,40.74,0.0646,-0.068,0.1326

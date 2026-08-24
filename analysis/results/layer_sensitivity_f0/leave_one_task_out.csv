@@ -1,0 +1,7 @@
+task_removed,signed_key_sensitivity,key_sign,signed_value_sensitivity,value_sign,axis_difference,axis_sign
+trec,0.7460014881894914,positive,-0.8305074078429456,negative,1.5765088960324372,positive
+lcc,0.21800148818949125,positive,0.003892592157055219,positive,0.21410889603243602,positive
+passage_retrieval_en,0.5460014881894913,positive,-0.8305074078429456,negative,1.376508896032437,positive
+2wikimqa,0.719481341669345,positive,-0.8430074078429456,negative,1.5624887495122906,positive
+multifieldqa_en,0.7674474949322694,positive,-0.8354918695654134,negative,1.6029393644976828,positive
+samsum,0.7330741397773686,positive,-0.8169155382775329,negative,1.5499896780549016,positive

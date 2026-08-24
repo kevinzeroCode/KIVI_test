@@ -1,0 +1,7 @@
+criterion,result
+criterion_1_combined6_signed_key_gt_0,PASS
+criterion_2_combined6_signed_value_lt_0,PASS
+criterion_3_combined6_axis_difference_gt_0,PASS
+criterion_4_lcc_removed_all_three_hold,FAIL
+criterion_5_at_least_one_new_task_axis_difference_gt_0,PASS
+EARLY_LAYER_EXPANSION,NO_GO

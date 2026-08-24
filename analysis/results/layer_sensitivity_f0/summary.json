@@ -1,0 +1,234 @@
+{
+  "timestamp": "2026-08-24T13:25:02.477879+08:00",
+  "seed": 42,
+  "bootstrap_iterations": 10000,
+  "pairing": {
+    "status": "PASS",
+    "configs_checked": [
+      "FP16",
+      "layer00_key",
+      "layer00_value"
+    ],
+    "tasks_checked": [
+      "trec",
+      "lcc",
+      "passage_retrieval_en",
+      "2wikimqa",
+      "multifieldqa_en",
+      "samsum"
+    ]
+  },
+  "task_results": {
+    "trec": {
+      "baseline_score": 66.5,
+      "key_score": 66.5,
+      "value_score": 66.5,
+      "key_delta": 0.0,
+      "value_delta": 0.0,
+      "axis_difference": 0.0
+    },
+    "lcc": {
+      "baseline_score": 52.99,
+      "key_score": 55.63,
+      "value_score": 48.82,
+      "key_delta": 2.6400000000000006,
+      "value_delta": -4.172000000000004,
+      "axis_difference": 6.812000000000005
+    },
+    "passage_retrieval_en": {
+      "baseline_score": 30.5,
+      "key_score": 31.5,
+      "value_score": 30.5,
+      "key_delta": 1.0,
+      "value_delta": 0.0,
+      "axis_difference": 1.0
+    },
+    "2wikimqa": {
+      "baseline_score": 24.45,
+      "key_score": 24.58,
+      "value_score": 24.51,
+      "key_delta": 0.13260073260073213,
+      "value_delta": 0.0625,
+      "axis_difference": 0.07010073260073213
+    },
+    "multifieldqa_en": {
+      "baseline_score": 43.42,
+      "key_score": 43.31,
+      "value_score": 43.44,
+      "key_delta": -0.10723003371388984,
+      "value_delta": 0.02492230861233935,
+      "axis_difference": -0.1321523423262292
+    },
+    "samsum": {
+      "baseline_score": 40.8,
+      "key_score": 40.87,
+      "value_score": 40.74,
+      "key_delta": 0.06463674206061398,
+      "value_delta": -0.06795934782706325,
+      "axis_difference": 0.13259608988767724
+    }
+  },
+  "aggregation_original_4": {
+    "signed_key_sensitivity": 0.9431501831501832,
+    "signed_value_sensitivity": -1.027375000000001,
+    "abs_key_sensitivity": 0.9431501831501832,
+    "abs_value_sensitivity": 1.058625000000001,
+    "axis_difference": 1.9705251831501842
+  },
+  "aggregation_new_2": {
+    "signed_key_sensitivity": -0.021296645826637928,
+    "signed_value_sensitivity": -0.021518519607361952,
+    "abs_key_sensitivity": 0.08593338788725191,
+    "abs_value_sensitivity": 0.0464408282197013,
+    "axis_difference": 0.00022187378072402453
+  },
+  "aggregation_combined_6": {
+    "signed_key_sensitivity": 0.6216679068245762,
+    "signed_value_sensitivity": -0.692089506535788,
+    "abs_key_sensitivity": 0.6574112513958728,
+    "abs_value_sensitivity": 0.7212302760732344,
+    "axis_difference": 1.3137574133603642
+  },
+  "bootstrap_original_4": {
+    "SignedKeySensitivity": {
+      "observed": 0.9431501831501832,
+      "bootstrap_mean": 0.9431254342490846,
+      "se": 0.23980283364071395,
+      "ci_low": 0.5153519688644671,
+      "ci_high": 1.45307518315018
+    },
+    "SignedValueSensitivity": {
+      "observed": -1.027375000000001,
+      "bootstrap_mean": -1.02835985,
+      "se": 0.19950293996964844,
+      "ci_low": -1.429874999999996,
+      "ci_high": -0.6554750000000038
+    },
+    "AxisDifference": {
+      "observed": 1.9705251831501842,
+      "bootstrap_mean": 1.9714852842490844,
+      "se": 0.30248389454604235,
+      "ci_low": 1.4123693795787522,
+      "ci_high": 2.5822194940476266
+    }
+  },
+  "bootstrap_new_2": {
+    "SignedKeySensitivity": {
+      "observed": -0.021296645826637928,
+      "bootstrap_mean": -0.021918899779971503,
+      "se": 0.14781803079560407,
+      "ci_low": -0.32283803244922815,
+      "ci_high": 0.26472084226440984
+    },
+    "SignedValueSensitivity": {
+      "observed": -0.021518519607361952,
+      "bootstrap_mean": -0.02106370168055064,
+      "se": 0.07072152359851788,
+      "ci_low": -0.16657963485813418,
+      "ci_high": 0.11279532559943826
+    },
+    "AxisDifference": {
+      "observed": 0.00022187378072402453,
+      "bootstrap_mean": -0.0008551980994208634,
+      "se": 0.1589518612201109,
+      "ci_low": -0.3190764890670785,
+      "ci_high": 0.3098095581306948
+    }
+  },
+  "bootstrap_combined_6": {
+    "SignedKeySensitivity": {
+      "observed": 0.6216679068245762,
+      "bootstrap_mean": 0.6214439895727323,
+      "se": 0.1668190715792996,
+      "ci_low": 0.3131806232268065,
+      "ci_high": 0.9672172306436035
+    },
+    "SignedValueSensitivity": {
+      "observed": -0.692089506535788,
+      "bootstrap_mean": -0.6925944672268503,
+      "se": 0.13541364151021373,
+      "ci_low": -0.9686210630865599,
+      "ci_high": -0.4397819023416753
+    },
+    "AxisDifference": {
+      "observed": 1.3137574133603642,
+      "bootstrap_mean": 1.3140384567995824,
+      "se": 0.20874235274613623,
+      "ci_low": 0.922348392135983,
+      "ci_high": 1.7367206397366115
+    }
+  },
+  "leave_one_task_out_combined_6": {
+    "trec": {
+      "signed_key_sensitivity": 0.7460014881894914,
+      "signed_value_sensitivity": -0.8305074078429456,
+      "axis_difference": 1.5765088960324372,
+      "key_sign": "positive",
+      "value_sign": "negative",
+      "axis_sign": "positive"
+    },
+    "lcc": {
+      "signed_key_sensitivity": 0.21800148818949125,
+      "signed_value_sensitivity": 0.003892592157055219,
+      "axis_difference": 0.21410889603243602,
+      "key_sign": "positive",
+      "value_sign": "positive",
+      "axis_sign": "positive"
+    },
+    "passage_retrieval_en": {
+      "signed_key_sensitivity": 0.5460014881894913,
+      "signed_value_sensitivity": -0.8305074078429456,
+      "axis_difference": 1.376508896032437,
+      "key_sign": "positive",
+      "value_sign": "negative",
+      "axis_sign": "positive"
+    },
+    "2wikimqa": {
+      "signed_key_sensitivity": 0.719481341669345,
+      "signed_value_sensitivity": -0.8430074078429456,
+      "axis_difference": 1.5624887495122906,
+      "key_sign": "positive",
+      "value_sign": "negative",
+      "axis_sign": "positive"
+    },
+    "multifieldqa_en": {
+      "signed_key_sensitivity": 0.7674474949322694,
+      "signed_value_sensitivity": -0.8354918695654134,
+      "axis_difference": 1.6029393644976828,
+      "key_sign": "positive",
+      "value_sign": "negative",
+      "axis_sign": "positive"
+    },
+    "samsum": {
+      "signed_key_sensitivity": 0.7330741397773686,
+      "signed_value_sensitivity": -0.8169155382775329,
+      "axis_difference": 1.5499896780549016,
+      "key_sign": "positive",
+      "value_sign": "negative",
+      "axis_sign": "positive"
+    }
+  },
+  "original_4_minus_lcc": {
+    "signed_key_sensitivity": 0.37753357753357736,
+    "signed_value_sensitivity": 0.020833333333333332,
+    "abs_key_sensitivity": 0.37753357753357736,
+    "abs_value_sensitivity": 0.020833333333333332,
+    "axis_difference": 0.35670024420024404
+  },
+  "combined_6_minus_lcc": {
+    "signed_key_sensitivity": 0.21800148818949125,
+    "signed_value_sensitivity": 0.003892592157055219,
+    "abs_key_sensitivity": 0.2608935016750472,
+    "abs_value_sensitivity": 0.03107633128788052,
+    "axis_difference": 0.21410889603243602
+  },
+  "gate_criteria": {
+    "criterion_1_combined6_signed_key_gt_0": true,
+    "criterion_2_combined6_signed_value_lt_0": true,
+    "criterion_3_combined6_axis_difference_gt_0": true,
+    "criterion_4_lcc_removed_all_three_hold": false,
+    "criterion_5_at_least_one_new_task_axis_difference_gt_0": true
+  },
+  "gate_decision": "NO_GO",
+  "master_log_limitation": "The F0 master nohup log is unusable due to a shell/job-control launch artifact (it contains only the line '[1]+: command not found', not actual generation output). This is NOT claimed to be a clean log scan. Independent evidence supporting generation integrity instead: exact 700/700 rows, pairing PASS, exit_code=0 for both conditions, nonfinite_logits_seen=false for both, stable boot IDs, and continuous host-monitor telemetry (~110 samples/condition at 30s cadence). Fixing the launcher's logging is a separate engineering task, not attempted here."
+}
