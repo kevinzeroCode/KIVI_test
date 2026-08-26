@@ -7,12 +7,14 @@ to compare its manual in-place RoPE application against the standard
 transformers apply_rotary_pos_emb on synthetic tensors -- no checkpoint is
 loaded.
 """
+import math
 import unittest
 
 import torch
 
 from utils.feature_extraction import (
     DISTRIBUTION_FIELDS,
+    FEATURE_RECORD_FIELDS,
     RECONSTRUCTION_FIELDS,
     build_feature_record,
     cpu_reference_quantize_dequantize,
@@ -116,6 +118,30 @@ class DistributionStatsTest(unittest.TestCase):
         stats = distribution_stats(torch.randn(10))
         self.assertEqual(set(stats.keys()), set(DISTRIBUTION_FIELDS))
 
+    def test_large_tensor_exceeding_torch_quantile_limit_falls_back_correctly(self):
+        # Regression test for a real bug found during the Stage G3A GPU
+        # canary: torch.quantile enforces a hard ~2^24-element ceiling on
+        # BOTH its CPU and CUDA backends ("quantile() input tensor is too
+        # large") -- hit in practice by a single real (32 heads, ~18k
+        # tokens, 128 head_dim) production K/V tensor. This constructs a
+        # >2^24-element CPU tensor (no CUDA needed to reproduce -- the
+        # limit is not device-specific) and confirms distribution_stats
+        # falls back to numpy.percentile without raising, and that the
+        # fallback's percentiles match torch.quantile computed on an
+        # identical smaller tensor structure (verifying the fallback path
+        # is not an approximation).
+        torch.manual_seed(7)
+        small = torch.randn(20000, dtype=torch.float64)
+        large = small.repeat(1000)  # > 2**24 elements, same value distribution
+        self.assertGreater(large.numel(), 2**24)
+
+        stats_small = distribution_stats(small)
+        stats_large = distribution_stats(large)
+
+        for field in ("p50_abs", "p95_abs", "p99_abs"):
+            self.assertAlmostEqual(stats_small[field], stats_large[field], places=6)
+        self.assertTrue(all(math.isfinite(v) for v in stats_large.values()))
+
     def test_deterministic(self):
         x = torch.randn(50)
         self.assertEqual(distribution_stats(x), distribution_stats(x.clone()))
@@ -153,6 +179,11 @@ class DistributionStatsCudaDeviceTest(unittest.TestCase):
 
 
 class FeatureRecordSchemaTest(unittest.TestCase):
+    """Token-count fields per utils/feature_schema.py's hardened schema
+    (Stage G3A-hardening): input_tokens, distribution_tokens,
+    quantized_tokens, residual_tokens replace the old ambiguous single
+    num_tokens field."""
+
     def _stats(self):
         x = torch.randn(4, 8)
         x_hat = x + 0.01 * torch.randn(4, 8)
@@ -160,20 +191,20 @@ class FeatureRecordSchemaTest(unittest.TestCase):
 
     def test_valid_axis_key_and_value(self):
         recon, dist = self._stats()
-        rec_key = build_feature_record("trec", 0, 5, "key", 8, recon, dist)
-        rec_val = build_feature_record("trec", 0, 5, "value", 8, recon, dist)
+        rec_key = build_feature_record("trec", 0, 5, "key", 10, 10, 8, 2, recon, dist)
+        rec_val = build_feature_record("trec", 0, 5, "value", 10, 10, 8, 2, recon, dist)
         self.assertEqual(rec_key["tensor_axis"], "key")
         self.assertEqual(rec_val["tensor_axis"], "value")
 
     def test_invalid_axis_raises(self):
         recon, dist = self._stats()
         with self.assertRaises(ValueError):
-            build_feature_record("trec", 0, 5, "bogus", 8, recon, dist)
+            build_feature_record("trec", 0, 5, "bogus", 10, 10, 8, 2, recon, dist)
 
     def test_per_layer_per_task_not_collapsed(self):
         recon, dist = self._stats()
-        rec_a = build_feature_record("trec", 0, 3, "key", 8, recon, dist)
-        rec_b = build_feature_record("lcc", 0, 7, "key", 8, recon, dist)
+        rec_a = build_feature_record("trec", 0, 3, "key", 10, 10, 8, 2, recon, dist)
+        rec_b = build_feature_record("lcc", 0, 7, "key", 10, 10, 8, 2, recon, dist)
         self.assertNotEqual(rec_a["task"], rec_b["task"])
         self.assertNotEqual(rec_a["layer_idx"], rec_b["layer_idx"])
 
@@ -182,12 +213,58 @@ class FeatureRecordSchemaTest(unittest.TestCase):
         incomplete_recon = dict(recon)
         del incomplete_recon["mse"]
         with self.assertRaises(ValueError):
-            build_feature_record("trec", 0, 5, "key", 8, incomplete_recon, dist)
+            build_feature_record("trec", 0, 5, "key", 10, 10, 8, 2, incomplete_recon, dist)
 
     def test_aggregation_field_is_explicit(self):
         recon, dist = self._stats()
-        rec = build_feature_record("trec", 0, 5, "key", 8, recon, dist, aggregation="no_aggregation_single_group")
+        rec = build_feature_record("trec", 0, 5, "key", 10, 10, 8, 2, recon, dist, aggregation="no_aggregation_single_group")
         self.assertEqual(rec["aggregation"], "no_aggregation_single_group")
+
+    def test_token_count_fields_present_and_explicit(self):
+        recon, dist = self._stats()
+        rec = build_feature_record("lcc", 0, 0, "key", 18062, 18062, 18048, 14, recon, dist)
+        self.assertEqual(rec["input_tokens"], 18062)
+        self.assertEqual(rec["distribution_tokens"], 18062)
+        self.assertEqual(rec["quantized_tokens"], 18048)
+        self.assertEqual(rec["residual_tokens"], 14)
+
+    def test_partition_invariant_enforced(self):
+        recon, dist = self._stats()
+        with self.assertRaises(ValueError):
+            # quantized_tokens + residual_tokens (8 + 3 = 11) != distribution_tokens (10)
+            build_feature_record("trec", 0, 5, "key", 10, 10, 8, 3, recon, dist)
+
+    def test_zero_residual_is_valid(self):
+        # distribution_tokens is an exact multiple of residual_length ->
+        # nothing held back as residual (production's key_states_full=None case).
+        recon, dist = self._stats()
+        rec = build_feature_record("trec", 0, 5, "key", 256, 256, 256, 0, recon, dist)
+        self.assertEqual(rec["residual_tokens"], 0)
+
+    def test_num_tokens_field_no_longer_present(self):
+        # Regression guard: the old ambiguous single "num_tokens" field
+        # (Stage G1/G3A) must not silently reappear.
+        recon, dist = self._stats()
+        rec = build_feature_record("trec", 0, 5, "key", 10, 10, 8, 2, recon, dist)
+        self.assertNotIn("num_tokens", rec)
+        self.assertNotIn("num_tokens", FEATURE_RECORD_FIELDS)
+
+    def test_old_num_tokens_kwarg_rejected(self):
+        # Regression guard: the old positional/keyword shape must not be
+        # silently accepted (would indicate a caller is still using
+        # ambiguous semantics).
+        recon, dist = self._stats()
+        with self.assertRaises(TypeError):
+            build_feature_record(task="trec", sample_idx=0, layer_idx=5, tensor_axis="key", num_tokens=8, recon_stats=recon, dist_stats=dist)
+
+    def test_deterministic_field_order(self):
+        recon, dist = self._stats()
+        rec = build_feature_record("trec", 0, 5, "key", 10, 10, 8, 2, recon, dist)
+        identity_and_tokens = list(rec.keys())[:9]
+        self.assertEqual(
+            identity_and_tokens,
+            ["task", "sample_idx", "layer_idx", "tensor_axis", "input_tokens", "distribution_tokens", "quantized_tokens", "residual_tokens", "aggregation"],
+        )
 
 
 class CpuReferenceQuantizeDequantizeTest(unittest.TestCase):

@@ -25,6 +25,7 @@ Two distinct quantizers are involved, and they must never be conflated:
 """
 from collections import OrderedDict
 
+import numpy as np
 import torch
 
 from utils.feature_schema import (
@@ -119,9 +120,22 @@ def distribution_stats(x, outlier_k=DEFAULT_OUTLIER_K, percentiles=DEFAULT_PERCE
     abs_flat = torch.abs(flat)
     max_abs = float(torch.max(abs_flat))
 
-    q = torch.quantile(abs_flat, torch.tensor(percentiles, dtype=torch.float64, device=abs_flat.device))
+    try:
+        q = torch.quantile(abs_flat, torch.tensor(percentiles, dtype=torch.float64, device=abs_flat.device))
+        q_values = [float(v) for v in q]
+    except RuntimeError:
+        # torch.quantile enforces a hard ~2^24-element ceiling on both its
+        # CPU and CUDA backends ("quantile() input tensor is too large"),
+        # hit in practice by a single (nh, tokens, head_dim) K/V tensor at
+        # real LongBench sequence lengths (e.g. 32 heads x ~18k tokens x
+        # 128 head_dim). numpy.percentile has no such limit and its
+        # default linear interpolation is numerically identical to
+        # torch.quantile's default (verified: 0.0 max diff on a shared
+        # test tensor) -- this is a correctness-preserving fallback, not
+        # an approximation.
+        q_values = [float(v) for v in np.percentile(abs_flat.cpu().numpy(), [p * 100 for p in percentiles])]
     percentile_stats = OrderedDict(
-        (f"p{int(round(p * 100))}_abs", float(v)) for p, v in zip(percentiles, q)
+        (f"p{int(round(p * 100))}_abs", v) for p, v in zip(percentiles, q_values)
     )
 
     if std > 0:
@@ -198,19 +212,51 @@ ATTENTION_GEOMETRY_EXTENSION_POINT = None
 # backward-compatible access from this module.
 # ---------------------------------------------------------------------------
 
-def build_feature_record(task, sample_idx, layer_idx, tensor_axis, num_tokens, recon_stats, dist_stats, aggregation="mean_over_tokens_and_heads"):
+def build_feature_record(
+    task,
+    sample_idx,
+    layer_idx,
+    tensor_axis,
+    input_tokens,
+    distribution_tokens,
+    quantized_tokens,
+    residual_tokens,
+    recon_stats,
+    dist_stats,
+    aggregation="mean_over_tokens_and_heads",
+):
     """Assembles one deterministic feature record row.
 
     tensor_axis: "key" or "value" -- preserves K vs V identity explicitly
     (never merged into one row).
 
+    Token-count fields (see utils/feature_schema.py's module docstring for
+    the full rationale -- this replaces the ambiguous single "num_tokens"
+    field used through Stage G3A):
+      input_tokens: full prompt length for this sample.
+      distribution_tokens: population dist_stats was computed over (the
+        family-agnostic real FP16 representation, before any KIVI-specific
+        residual exclusion).
+      quantized_tokens: population recon_stats was computed over (exactly
+        what production's real Triton quantizer received -- family-
+        specific, must not be weakened from the G2 production-parity
+        population).
+      residual_tokens: distribution_tokens - quantized_tokens, tokens KIVI
+        kept at full precision instead of quantizing.
+    quantized_tokens + residual_tokens == distribution_tokens is enforced
+    below as a KIVI-specific partition invariant (every token is either
+    quantized or held as residual, never both, never dropped) -- this is a
+    property of KIVI's routing, not assumed to hold for every future
+    quantizer family that might someday supply recon_stats/dist_stats
+    computed over different populations.
+
     aggregation: MUST be recorded explicitly whenever recon_stats/dist_stats
-    were computed after reducing over tokens/heads/channels -- this
-    function refuses to guess or default-hide that away; the caller must
-    state how the reduction was done (e.g. "mean_over_tokens_and_heads",
-    "per_head_then_mean", "no_aggregation_single_group"). This is metadata
-    only (not re-derived here) -- computing the reduction correctly is the
-    caller's responsibility.
+    were computed after reducing over heads/channels beyond simple
+    flattening -- this function refuses to guess or default-hide that away;
+    the caller must state how the reduction was done (e.g.
+    "flattened_full_tensor_no_aggregation", "mean_over_tokens_and_heads",
+    "per_head_then_mean"). This is metadata only (not re-derived here) --
+    computing the reduction correctly is the caller's responsibility.
     """
     if tensor_axis not in ("key", "value"):
         raise ValueError(f"tensor_axis must be 'key' or 'value', got {tensor_axis!r}")
@@ -218,6 +264,11 @@ def build_feature_record(task, sample_idx, layer_idx, tensor_axis, num_tokens, r
     missing_dist = [f for f in DISTRIBUTION_FIELDS if f not in dist_stats]
     if missing_recon or missing_dist:
         raise ValueError(f"incomplete stats: missing recon={missing_recon} missing dist={missing_dist}")
+    if quantized_tokens + residual_tokens != distribution_tokens:
+        raise ValueError(
+            f"KIVI token-partition invariant violated: quantized_tokens({quantized_tokens}) + "
+            f"residual_tokens({residual_tokens}) != distribution_tokens({distribution_tokens})"
+        )
 
     record = OrderedDict(
         [
@@ -225,7 +276,10 @@ def build_feature_record(task, sample_idx, layer_idx, tensor_axis, num_tokens, r
             ("sample_idx", sample_idx),
             ("layer_idx", layer_idx),
             ("tensor_axis", tensor_axis),
-            ("num_tokens", num_tokens),
+            ("input_tokens", input_tokens),
+            ("distribution_tokens", distribution_tokens),
+            ("quantized_tokens", quantized_tokens),
+            ("residual_tokens", residual_tokens),
             ("aggregation", aggregation),
         ]
     )
