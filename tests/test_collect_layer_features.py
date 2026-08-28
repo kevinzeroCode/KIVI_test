@@ -3,18 +3,31 @@ logic (Stage G3A). No torch/transformers/CUDA required -- these test the
 pure-Python planning, policy-construction, call-attribution-order, and
 output-validation helpers, never a real forward pass.
 """
+import inspect
 import json
 import os
 import tempfile
 import unittest
 
 from scripts.collect_layer_features import (
+    DEFAULT_CALIBRATION_PERCENTILES,
+    F0_DIAGNOSTIC_LAYERS,
+    F0_DIAGNOSTIC_TASKS,
+    PRIMARY_STAGE_E_LAYERS,
+    PRIMARY_STAGE_E_TASKS,
     FeatureCollectionConfigError,
     build_collection_plan,
     build_probe_policy_obj,
+    calibration_percentiles_for_sample_count,
     expected_call_order,
     expected_identities,
+    extract_length_pairs,
     key_residual_tokens,
+    load_task_lengths,
+    percentile_rank_index,
+    run_real_collection,
+    select_calibration_indices,
+    validate_task_layer_scope,
     value_residual_tokens,
     validate_axes,
     validate_layers,
@@ -182,6 +195,175 @@ class KeyValueResidualAsymmetryTest(unittest.TestCase):
             value_q = distribution_tokens - value_r
             self.assertEqual(key_q + key_r, distribution_tokens)
             self.assertEqual(value_q + value_r, distribution_tokens)
+
+
+class PercentileRankIndexTest(unittest.TestCase):
+    def test_known_positions(self):
+        # n=160 (0..159): p20 -> round(0.2*159)=32? check exact formula
+        self.assertEqual(percentile_rank_index(160, 20), round(0.2 * 159))
+        self.assertEqual(percentile_rank_index(160, 80), round(0.8 * 159))
+
+    def test_boundaries_clamped(self):
+        self.assertEqual(percentile_rank_index(10, 0), 0)
+        self.assertEqual(percentile_rank_index(10, 100), 9)
+
+    def test_empty_raises(self):
+        with self.assertRaises(FeatureCollectionConfigError):
+            percentile_rank_index(0, 50)
+
+    def test_single_element(self):
+        self.assertEqual(percentile_rank_index(1, 20), 0)
+        self.assertEqual(percentile_rank_index(1, 80), 0)
+
+
+class SelectCalibrationIndicesTest(unittest.TestCase):
+    def test_reproduces_four_distinct_percentile_samples(self):
+        pairs = [(i, length) for i, length in enumerate(range(0, 500, 5))]  # 100 examples, length = 5*idx
+        selected = select_calibration_indices(pairs)
+        self.assertEqual(len(selected), 4)
+        self.assertEqual([s["percentile"] for s in selected], [20, 40, 60, 80])
+        # Distinct dataset indices selected (no collision on this well-spread input).
+        self.assertEqual(len({s["dataset_index"] for s in selected}), 4)
+        # Monotonic: higher percentile -> longer (or equal) input length.
+        lengths = [s["input_length"] for s in selected]
+        self.assertEqual(lengths, sorted(lengths))
+
+    def test_tie_broken_by_ascending_original_index(self):
+        # All examples share the same length -- percentile position must
+        # still resolve to a specific, deterministic original index via
+        # the (length, index) sort, never dataset order/insertion order.
+        pairs = [(i, 100) for i in range(20)]
+        selected = select_calibration_indices(pairs)
+        # With all lengths equal, sorted order == ascending index order,
+        # so rank_position directly gives the selected dataset_index.
+        for s in selected:
+            self.assertEqual(s["dataset_index"], s["rank_position"])
+
+    def test_never_uses_generated_or_sensitivity_data(self):
+        # Purely a signature/contract check: the function's only inputs
+        # are (index, length) pairs -- no prediction, score, or feature
+        # argument exists to accidentally leak in.
+        import inspect
+        sig = inspect.signature(select_calibration_indices)
+        self.assertEqual(list(sig.parameters.keys()), ["index_length_pairs", "percentiles"])
+
+    def test_deterministic_across_repeated_calls(self):
+        pairs = [(i, (i * 37) % 200) for i in range(150)]
+        self.assertEqual(select_calibration_indices(pairs), select_calibration_indices(pairs))
+
+    def test_small_dataset_collision_avoidance_stays_distinct(self):
+        # A tiny dataset where naive nearest-rank positions could collide;
+        # the forward/backward search must still produce 4 distinct rows.
+        pairs = [(i, i) for i in range(5)]
+        selected = select_calibration_indices(pairs)
+        self.assertEqual(len({s["rank_position"] for s in selected}), 4)
+
+
+class ValidateTaskLayerScopeTest(unittest.TestCase):
+    """Stage G3B-IMPL Part 7 guard: diagnostic tasks must never silently
+    collect the 8 primary layers, and primary tasks must never silently
+    collect an incomplete layer set."""
+
+    def test_diagnostic_tasks_require_layer_zero_only(self):
+        validate_task_layer_scope(["multifieldqa_en"], list(F0_DIAGNOSTIC_LAYERS))  # no raise
+
+    def test_diagnostic_tasks_with_all_eight_layers_raises(self):
+        with self.assertRaises(FeatureCollectionConfigError):
+            validate_task_layer_scope(["multifieldqa_en", "samsum"], list(PRIMARY_STAGE_E_LAYERS))
+
+    def test_primary_tasks_require_all_eight_layers(self):
+        validate_task_layer_scope(list(PRIMARY_STAGE_E_TASKS), list(PRIMARY_STAGE_E_LAYERS))  # no raise
+
+    def test_primary_tasks_with_incomplete_layers_raises(self):
+        with self.assertRaises(FeatureCollectionConfigError):
+            validate_task_layer_scope(["lcc"], [0])
+
+    def test_mixing_primary_and_diagnostic_raises(self):
+        with self.assertRaises(FeatureCollectionConfigError):
+            validate_task_layer_scope(["lcc", "samsum"], [0])
+
+    def test_adhoc_task_outside_registered_sets_is_unconstrained(self):
+        validate_task_layer_scope(["hotpotqa"], [3, 7, 19])  # no raise -- ad-hoc use still allowed
+
+
+class FirstNRegressionGuardTest(unittest.TestCase):
+    """Regression guard (Stage G3B-IMPL Part 9): first-N sample indexing
+    must never silently reappear as real collection's selection mechanism.
+    Verified by source inspection since running run_real_collection itself
+    requires a GPU/model."""
+
+    def test_real_collection_uses_percentile_selection_not_first_n(self):
+        source = inspect.getsource(run_real_collection)
+        self.assertIn("select_calibration_indices(extract_length_pairs(data)", source)
+        self.assertNotIn("for sample_idx in range(", source)
+        self.assertNotIn("range(num_samples)", source)
+
+
+class CalibrationPercentilesForSampleCountTest(unittest.TestCase):
+    """Stage-G3B-IMPL-2 Part 7/8: --num-samples must explicitly control the
+    calibration design, not be a silently-ignored default. num_samples=4
+    (the pre-registered design) must reproduce DEFAULT_CALIBRATION_PERCENTILES
+    (20, 40, 60, 80) EXACTLY -- same values, same type -- so
+    --num-samples 4 is provably not a no-op and reproduces the persisted
+    Stage-G3B selection byte-for-byte."""
+
+    def test_four_samples_matches_default_percentiles_exactly(self):
+        self.assertEqual(calibration_percentiles_for_sample_count(4), DEFAULT_CALIBRATION_PERCENTILES)
+        self.assertEqual(calibration_percentiles_for_sample_count(4), (20, 40, 60, 80))
+
+    def test_other_counts_are_evenly_spaced_and_distinct_from_default(self):
+        percentiles = calibration_percentiles_for_sample_count(3)
+        self.assertEqual(len(percentiles), 3)
+        self.assertEqual(percentiles, (25.0, 50.0, 75.0))
+        self.assertNotEqual(percentiles, DEFAULT_CALIBRATION_PERCENTILES)
+
+    def test_zero_or_negative_raises(self):
+        with self.assertRaises(FeatureCollectionConfigError):
+            calibration_percentiles_for_sample_count(0)
+        with self.assertRaises(FeatureCollectionConfigError):
+            calibration_percentiles_for_sample_count(-1)
+
+
+class PreviewVersusRealSelectionParityTest(unittest.TestCase):
+    """Proves preview (load_task_lengths, used by --preview-calibration)
+    and real collection (extract_length_pairs on an already-loaded
+    dataset) feed the exact same selection function and produce identical
+    results -- exactly ONE selection implementation, not two independent
+    ones. CPU-only (no torch/GPU); requires the `datasets` library and the
+    already-locally-cached THUDM/LongBench lcc split (used throughout
+    Stages G2/G3A/G3B of this same project)."""
+
+    def test_preview_and_direct_dataset_load_agree_with_explicit_num_samples_4(self):
+        from datasets import load_dataset
+
+        percentiles = calibration_percentiles_for_sample_count(4)  # what --num-samples 4 produces
+        preview_pairs = load_task_lengths("lcc")
+        data = load_dataset("THUDM/LongBench", "lcc", split="test", trust_remote_code=True)
+        real_collection_pairs = extract_length_pairs(data)
+        self.assertEqual(preview_pairs, real_collection_pairs)
+        self.assertEqual(
+            select_calibration_indices(preview_pairs, percentiles=percentiles),
+            select_calibration_indices(real_collection_pairs, percentiles=percentiles),
+        )
+
+    def test_explicit_num_samples_4_reproduces_persisted_preregistration_indices(self):
+        # Byte-for-byte proof against docs/stage_g3b_pre_registration.md's
+        # persisted table, using the exact percentiles --num-samples 4
+        # would compute.
+        percentiles = calibration_percentiles_for_sample_count(4)
+        expected = {
+            "trec": [153, 154, 82, 151],
+            "lcc": [122, 174, 214, 357],
+            "passage_retrieval_en": [141, 185, 105, 41],
+            "2wikimqa": [164, 44, 138, 38],
+            "multifieldqa_en": [50, 103, 81, 92],
+            "samsum": [58, 118, 151, 52],
+        }
+        for task, expected_indices in expected.items():
+            pairs = load_task_lengths(task)
+            selection = select_calibration_indices(pairs, percentiles=percentiles)
+            got_indices = [sel["dataset_index"] for sel in selection]
+            self.assertEqual(got_indices, expected_indices, f"task={task}")
 
 
 class ExpectedCallOrderTest(unittest.TestCase):

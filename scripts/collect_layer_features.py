@@ -58,6 +58,19 @@ from utils.jsonl_integrity import inspect_jsonl  # noqa: E402 -- torch-free
 DEFAULT_OUTPUT_ROOT = os.path.join(REPO_ROOT, "outputs", "layer_feature_pilot")
 DEFAULT_TASKS = ("trec", "lcc", "passage_retrieval_en", "2wikimqa")
 DEFAULT_NUM_SAMPLES = 20
+
+# Stage G3B-PRE pre-registered scientific feature-pilot design (see
+# docs/stage_g3b_pre_registration.md). PRIMARY_STAGE_E_TASKS/LAYERS are
+# exactly the Stage-E 8-layer x 4-task pilot's grid, reused (not
+# re-collected) as the sensitivity-label source; F0_DIAGNOSTIC_TASKS have
+# labels only at layer 0 (from Stage F0) and are never used in the primary
+# across-layer correlation.
+PRIMARY_STAGE_E_TASKS = ("trec", "lcc", "passage_retrieval_en", "2wikimqa")
+PRIMARY_STAGE_E_LAYERS = (0, 4, 9, 13, 18, 22, 27, 31)
+F0_DIAGNOSTIC_TASKS = ("multifieldqa_en", "samsum")
+F0_DIAGNOSTIC_LAYERS = (0,)
+CALIBRATION_AXES = ("key", "value")
+CALIBRATION_SAMPLES_PER_TASK = 4
 DEFAULT_PROBE_BITS = 2
 
 # Mirrors run_layer_sensitivity_pilot.py's conflicting-process discipline
@@ -239,6 +252,202 @@ def build_probe_policy_obj(layers, k_bits, v_bits):
     }
 
 
+DEFAULT_CALIBRATION_PERCENTILES = (20, 40, 60, 80)
+
+
+def calibration_percentiles_for_sample_count(num_samples):
+    """Maps --num-samples to the exact set of percentile points
+    select_calibration_indices should use. For
+    num_samples == len(DEFAULT_CALIBRATION_PERCENTILES) (4, the
+    pre-registered design), returns DEFAULT_CALIBRATION_PERCENTILES
+    (20, 40, 60, 80) EXACTLY -- not a numerically-close approximation --
+    so --num-samples 4 reproduces the persisted Stage-G3B selection
+    byte-for-byte. For any other count, generates that many evenly-spaced
+    percentile points strictly inside (0, 100) via 100*(i+1)/(N+1); this
+    formula reduces to exactly (20, 40, 60, 80) at N=4, so the two cases
+    are mathematically the same rule, only made exact-typed (int, not
+    float) at the pre-registered N to guarantee the byte-for-byte match.
+    """
+    if num_samples <= 0:
+        raise FeatureCollectionConfigError(f"--num-samples must be positive, got {num_samples}")
+    if num_samples == len(DEFAULT_CALIBRATION_PERCENTILES):
+        return DEFAULT_CALIBRATION_PERCENTILES
+    return tuple(100.0 * (i + 1) / (num_samples + 1) for i in range(num_samples))
+
+
+def percentile_rank_index(n, percentile):
+    """Deterministic nearest-rank index into a 0-indexed sequence of length
+    n for a given percentile in [0, 100]. Pure integer arithmetic (round
+    half-to-even via Python's round()), no interpolation -- always selects
+    an actual existing element, never a synthesized interpolated value.
+    """
+    if n <= 0:
+        raise FeatureCollectionConfigError("cannot select a percentile index from an empty dataset")
+    position = int(round((percentile / 100.0) * (n - 1)))
+    return max(0, min(n - 1, position))
+
+
+def select_calibration_indices(index_length_pairs, percentiles=DEFAULT_CALIBRATION_PERCENTILES):
+    """Stage G3B-PRE calibration sample selection (Part 4): pure function,
+    metadata-only -- takes (original_dataset_index, input_length) pairs
+    (LongBench's own precomputed "length" field; no tokenization, no model,
+    no generated predictions, no sensitivity values, no feature values) and
+    deterministically selects one example per requested percentile of
+    input length.
+
+    Sorted by (length, original_index) ascending, so ties in length are
+    broken deterministically by the smaller original dataset index (never
+    by first-N dataset-order bias -- the sort is by length first). If a
+    percentile's nearest-rank position collides with an already-selected
+    position (only possible for very small datasets or many close
+    percentiles), the nearest unused position is used instead (searching
+    forward then backward), keeping the selection deterministic and
+    collision-free.
+
+    Returns one dict per percentile: {percentile, rank_position,
+    dataset_index, input_length}, in the same order as `percentiles`.
+    """
+    n = len(index_length_pairs)
+    ordered = sorted(index_length_pairs, key=lambda pair: (pair[1], pair[0]))
+    used_positions = set()
+    selected = []
+    for p in percentiles:
+        pos = percentile_rank_index(n, p)
+        forward, backward = pos, pos
+        while pos in used_positions:
+            if forward < n - 1:
+                forward += 1
+                pos = forward
+            elif backward > 0:
+                backward -= 1
+                pos = backward
+            else:
+                raise FeatureCollectionConfigError(f"could not find an unused position for percentile {p} in a dataset of size {n}")
+        used_positions.add(pos)
+        idx, length = ordered[pos]
+        selected.append({"percentile": p, "rank_position": pos, "dataset_index": idx, "input_length": length})
+    return selected
+
+
+def extract_length_pairs(data):
+    """Pulls (original_index, LongBench "length" metadata field) pairs out
+    of an already-loaded HF dataset split. This is the ONLY place that
+    reads this field -- both --preview-calibration (via load_task_lengths,
+    which loads its own copy of `data`) and run_real_collection (which
+    reuses the `data` it already loaded for generation) call this same
+    function, so there is exactly one selection-input extraction path, not
+    two independent ones.
+    """
+    return [(idx, example["length"]) for idx, example in enumerate(data)]
+
+
+def load_task_lengths(task):
+    """Loads only the metadata needed for calibration sample selection --
+    LongBench's own precomputed per-example "length" field -- for every
+    example in a task's test split. Requires the `datasets` library
+    (network/cache I/O) but NOT torch/transformers and NOT a model or GPU;
+    no tokenization or forward pass occurs. Deferred import keeps
+    --dry-run's default (no --preview-calibration) path free of even this
+    dependency. Used by --preview-calibration only; run_real_collection
+    reuses its already-loaded dataset via extract_length_pairs directly to
+    avoid a redundant load_dataset call.
+    """
+    from datasets import load_dataset
+
+    data = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True)
+    return extract_length_pairs(data)
+
+
+def validate_task_layer_scope(tasks, layers):
+    """Stage G3B-IMPL guard (Part 7): prevents the diagnostic tasks
+    (multifieldqa_en, samsum) from silently collecting all 8 primary
+    layers, and prevents the primary Stage-E tasks from silently
+    collecting an incomplete layer set. Any task outside both
+    pre-registered sets is unconstrained (ad-hoc/exploratory use is still
+    allowed). Mixing a primary and a diagnostic task in the same
+    invocation is rejected outright -- they require different layer sets,
+    so Part 7 requires two separate invocations (primary/, diagnostic/
+    output subdirectories) instead.
+    """
+    tasks = set(tasks)
+    layers_sorted = sorted(layers)
+    has_primary = bool(tasks & set(PRIMARY_STAGE_E_TASKS))
+    has_diagnostic = bool(tasks & set(F0_DIAGNOSTIC_TASKS))
+    if has_primary and has_diagnostic:
+        raise FeatureCollectionConfigError(
+            "cannot mix primary Stage-E tasks and F0-diagnostic tasks in one invocation "
+            "(they require different layer scopes) -- run two separate invocations instead"
+        )
+    if has_diagnostic and layers_sorted != list(F0_DIAGNOSTIC_LAYERS):
+        raise FeatureCollectionConfigError(
+            f"F0-diagnostic task(s) {sorted(tasks & set(F0_DIAGNOSTIC_TASKS))} require exactly "
+            f"--layers {list(F0_DIAGNOSTIC_LAYERS)}, got {layers_sorted}"
+        )
+    if has_primary and layers_sorted != list(PRIMARY_STAGE_E_LAYERS):
+        raise FeatureCollectionConfigError(
+            f"primary Stage-E task(s) {sorted(tasks & set(PRIMARY_STAGE_E_TASKS))} require exactly "
+            f"--layers {list(PRIMARY_STAGE_E_LAYERS)}, got {layers_sorted}"
+        )
+
+
+def preview_calibration_plan(output_root, num_samples=CALIBRATION_SAMPLES_PER_TASK):
+    """Stage G3B-PRE dry-run preview of the pre-registered scientific
+    feature-pilot design (Part 15): real, metadata-only calibration sample
+    selection for every pre-registered task, plus the resulting exact
+    feature-record counts. Uses only the `datasets` library (no torch, no
+    transformers, no model, no GPU, no tokenization, no forward pass).
+
+    num_samples defaults to the pre-registered 4 -- the SAME
+    calibration_percentiles_for_sample_count(4) == DEFAULT_CALIBRATION_PERCENTILES
+    == (20, 40, 60, 80) that run_real_collection uses when --num-samples 4 is
+    passed explicitly, so this preview and the real collection path always
+    agree given the same --num-samples value.
+    """
+    percentiles = calibration_percentiles_for_sample_count(num_samples)
+    all_tasks = list(PRIMARY_STAGE_E_TASKS) + list(F0_DIAGNOSTIC_TASKS)
+    selection_by_task = {}
+    for task in all_tasks:
+        pairs = load_task_lengths(task)
+        selection_by_task[task] = select_calibration_indices(pairs, percentiles=percentiles)
+
+    print(f"Calibration sample selection (metadata-only length percentiles, deterministic, num_samples={num_samples}):")
+    for task in all_tasks:
+        role = "PRIMARY (Stage-E across-layer labels)" if task in PRIMARY_STAGE_E_TASKS else "F0-DIAGNOSTIC (Layer-0-only label)"
+        print(f"\n  {task} [{role}]:")
+        for sel in selection_by_task[task]:
+            print(
+                f"    p{str(sel['percentile']):>5}: dataset_index={sel['dataset_index']:<6d} "
+                f"input_length={sel['input_length']:<6d} rank_position={sel['rank_position']}"
+            )
+
+    n_primary = len(PRIMARY_STAGE_E_TASKS) * num_samples * len(PRIMARY_STAGE_E_LAYERS) * len(CALIBRATION_AXES)
+    n_f0 = len(F0_DIAGNOSTIC_TASKS) * num_samples * len(F0_DIAGNOSTIC_LAYERS) * len(CALIBRATION_AXES)
+    print(
+        f"\nPrimary Stage-E scope: {len(PRIMARY_STAGE_E_TASKS)} tasks x {num_samples} samples x "
+        f"{len(PRIMARY_STAGE_E_LAYERS)} layers x {len(CALIBRATION_AXES)} axes = {n_primary} feature records"
+    )
+    print(
+        f"F0 diagnostic scope:   {len(F0_DIAGNOSTIC_TASKS)} tasks x {num_samples} samples x "
+        f"{len(F0_DIAGNOSTIC_LAYERS)} layer x {len(CALIBRATION_AXES)} axes = {n_f0} feature records"
+    )
+    print(f"Expected total: {n_primary + n_f0} feature records")
+
+    all_dataset_indices = [
+        (task, sel["dataset_index"]) for task in all_tasks for sel in selection_by_task[task]
+    ]
+    collisions = len(all_dataset_indices) != len(set(all_dataset_indices))
+    conflicts = check_no_conflicting_process()
+    print(f"\nOutput root (not written this round): {output_root}")
+    print(f"Within-task duplicate-sample collisions: {'FOUND' if collisions else 'NONE'}")
+    print(f"Conflicting-process check: {'NONE FOUND' if not conflicts else conflicts}")
+    print(
+        "\nNo torch/transformers/model/GPU import occurred; only the `datasets` library was used, "
+        "and only to read each example's precomputed LongBench 'length' metadata field -- no "
+        "tokenization, no forward pass, no scientific feature JSONL was written."
+    )
+    return 0
+
+
 def expected_call_order(layers):
     """Deterministic order in which models/llama_kivi.py's decoder stack
     will call the per-axis production quantizer entry points
@@ -352,12 +561,14 @@ def run_real_collection(args):
 
     task_names = list(args.tasks) if args.tasks else list(DEFAULT_TASKS)
     task_counts = select_task_counts(task_names)
-    num_samples = validate_num_samples(args.num_samples)
     axes = validate_axes(args.axes)
+    num_samples = validate_num_samples(args.num_samples)
+    calibration_percentiles = calibration_percentiles_for_sample_count(num_samples)
 
     probe_config = plb.LlamaConfig.from_pretrained(args.model_name_or_path)
     num_hidden_layers = probe_config.num_hidden_layers
     layers = validate_layers(args.layers, num_hidden_layers)
+    validate_task_layer_scope(task_names, layers)
 
     policy_obj = build_probe_policy_obj(layers, args.k_bits, args.v_bits)
     resolved = resolve_layer_policy(num_hidden_layers, 16, 16, policy_obj)
@@ -408,14 +619,34 @@ def run_real_collection(args):
 
     features_path = os.path.join(out_dir, "features.jsonl")
     sample_records = []
+    sample_selection_records = []
     task_sample_pairs = []
     nonfinite_any = False
 
     with open(features_path, "w", encoding="utf-8") as feat_f:
         for task in task_counts:
             data = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True)
-            n = min(num_samples, task_counts[task], len(data))
-            for sample_idx in range(n):
+            # Stage G3B-IMPL: sample selection is the SAME deterministic,
+            # metadata-only, length-stratified percentile rule previewed by
+            # --preview-calibration (select_calibration_indices), reusing
+            # this already-loaded `data` via extract_length_pairs rather
+            # than a second load_dataset call. This is the single shared
+            # selection implementation -- deterministic-first-N indexing is
+            # never consulted here. --num-samples controls how many
+            # evenly-spaced percentile points are used (via
+            # calibration_percentiles_for_sample_count), NOT a first-N cap.
+            selection = select_calibration_indices(extract_length_pairs(data), percentiles=calibration_percentiles)
+            for sel in selection:
+                sample_idx = sel["dataset_index"]
+                sample_selection_records.append(
+                    {
+                        "task": task,
+                        "dataset_index": sample_idx,
+                        "selection_percentile": sel["percentile"],
+                        "selection_rank": sel["rank_position"],
+                        "selection_length": sel["input_length"],
+                    }
+                )
                 task_sample_pairs.append((task, sample_idx))
                 json_obj = data[sample_idx]
                 prompt = dataset2prompt[task].format(**json_obj)
@@ -633,6 +864,14 @@ def run_real_collection(args):
     with open(os.path.join(out_dir, "run_config.json"), "w", encoding="utf-8") as f:
         json.dump(run_config, f, indent=2)
 
+    # Provenance for the pre-registered selection rule (Stage G3B-IMPL Part
+    # 6): selection_length is LongBench's own metadata field used to pick
+    # this sample BEFORE collection; it is intentionally never conflated
+    # with a sample's manifest["samples"][i]["input_tokens"], which is the
+    # actual tokenized model input length measured DURING collection.
+    with open(os.path.join(out_dir, "sample_selection.json"), "w", encoding="utf-8") as f:
+        json.dump(sample_selection_records, f, indent=2)
+
     manifest = {
         "run_label": run_label,
         "boot_id_start": boot_id_start,
@@ -667,7 +906,7 @@ def parse_args(argv=None):
     p.add_argument("--model_name_or_path", default="lmsys/longchat-7b-v1.5-32k")
     p.add_argument("--cache_dir", default="./cached_models")
     p.add_argument("--tasks", nargs="+", default=None, help="Defaults to the same 4-task Stage-D screening set. Any task in utils.pilot_policy.SUPPORTED_TASK_COUNTS may be requested explicitly.")
-    p.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES, help="Per-task sample cap (capped further by that task's available example count). Sample indices are always the deterministic first N of the dataset's test split.")
+    p.add_argument("--num-samples", type=int, default=DEFAULT_NUM_SAMPLES, help="In --dry-run: a generic per-task record-count planning cap (no specific indices implied). In --preview-calibration and real collection: the number of evenly-spaced length-percentile calibration samples selected per task via calibration_percentiles_for_sample_count -- NOT first-N indexing. The default (20) is a generic planning default and is NOT the pre-registered Stage-G3B design; pass --num-samples 4 explicitly to reproduce the pre-registered 20/40/60/80 percentile selection exactly.")
     p.add_argument("--layers", type=int, nargs="+", default=list(range(EXPECTED_NUM_LAYERS)))
     p.add_argument("--axes", nargs="+", default=list(PILOT_AXES), choices=list(PILOT_AXES))
     p.add_argument("--k-bits", type=int, default=DEFAULT_PROBE_BITS, help="Bit width applied to K at every probed layer (both axes are always quantized together; --axes only filters which feature records are emitted).")
@@ -680,11 +919,15 @@ def parse_args(argv=None):
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--run_label", default=None)
     p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--preview-calibration", action="store_true", help="Preview the pre-registered Stage G3B calibration sample selection and full collection plan. Uses the `datasets` library only (no torch/transformers/model/GPU).")
     return p.parse_args(argv)
 
 
 def main():
     args = parse_args()
+
+    if args.preview_calibration:
+        return preview_calibration_plan(args.output_root, validate_num_samples(args.num_samples))
 
     if args.dry_run:
         task_names = list(args.tasks) if args.tasks else list(DEFAULT_TASKS)
