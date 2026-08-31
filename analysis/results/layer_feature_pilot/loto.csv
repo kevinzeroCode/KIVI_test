@@ -1,0 +1,9 @@
+axis,removed_task,is_preregistered_criterion_c,negative_count,median_remaining_gate_rho,pass
+key,trec,False,0,0.21957751641341997,False
+key,lcc,True,1,0.21957751641341997,False
+key,passage_retrieval_en,False,1,0.11904761904761905,False
+key,2wikimqa,False,1,0.11904761904761905,False
+value,trec,False,2,-0.09523809523809526,True
+value,lcc,True,1,0.0,False
+value,passage_retrieval_en,False,1,0.0,False
+value,2wikimqa,False,2,-0.09523809523809526,True

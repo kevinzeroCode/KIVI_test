@@ -1,0 +1,9 @@
+axis,task,raw_rho,gate_rho,feature_variance_nonzero,target_variance_nonzero
+key,trec,-0.08247860988423225,-0.08247860988423225,True,True
+key,lcc,0.11904761904761905,0.11904761904761905,True,True
+key,passage_retrieval_en,0.28288947493050187,0.28288947493050187,True,True
+key,2wikimqa,0.21957751641341997,0.21957751641341997,True,True
+value,trec,,0.0,True,False
+value,lcc,-0.09523809523809526,-0.09523809523809526,True,True
+value,passage_retrieval_en,-0.25197631533948484,-0.25197631533948484,True,True
+value,2wikimqa,0.4047619047619048,0.4047619047619048,True,True

@@ -1,0 +1,3 @@
+axis,criterion_a_pass,criterion_a_negative_count,criterion_b_pass,criterion_b_median_abs_gate_rho,criterion_c_pass,criterion_c_negative_count,criterion_c_median_remaining_gate_rho,criterion_d_pass,criterion_d_gate_rho,axis_go
+key,False,1,False,0.1693125677305195,False,1,0.21957751641341997,False,0.5,False
+value,False,2,False,0.17360720528879003,False,1,0.0,True,-1.0,False

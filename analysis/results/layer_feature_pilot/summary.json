@@ -1,0 +1,326 @@
+{
+  "generated_at": "2026-08-31T07:45:06.656753+00:00",
+  "primary_features_path": "/home/kevin/Documents/KIVI_test/outputs/layer_feature_pilot/primary/primary_g3b/features.jsonl",
+  "diagnostic_features_path": "/home/kevin/Documents/KIVI_test/outputs/layer_feature_pilot/diagnostic/diagnostic_g3b/features.jsonl",
+  "primary_row_count": 256,
+  "diagnostic_row_count": 16,
+  "primary_observations_per_axis": 32,
+  "effect_size_threshold": 0.5,
+  "task_spearman_relative_l2": {
+    "key": {
+      "trec": {
+        "task": "trec",
+        "raw_rho": -0.08247860988423225,
+        "gate_rho": -0.08247860988423225,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      },
+      "lcc": {
+        "task": "lcc",
+        "raw_rho": 0.11904761904761905,
+        "gate_rho": 0.11904761904761905,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      },
+      "passage_retrieval_en": {
+        "task": "passage_retrieval_en",
+        "raw_rho": 0.28288947493050187,
+        "gate_rho": 0.28288947493050187,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      },
+      "2wikimqa": {
+        "task": "2wikimqa",
+        "raw_rho": 0.21957751641341997,
+        "gate_rho": 0.21957751641341997,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      }
+    },
+    "value": {
+      "trec": {
+        "task": "trec",
+        "raw_rho": null,
+        "gate_rho": 0.0,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": false
+      },
+      "lcc": {
+        "task": "lcc",
+        "raw_rho": -0.09523809523809526,
+        "gate_rho": -0.09523809523809526,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      },
+      "passage_retrieval_en": {
+        "task": "passage_retrieval_en",
+        "raw_rho": -0.25197631533948484,
+        "gate_rho": -0.25197631533948484,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      },
+      "2wikimqa": {
+        "task": "2wikimqa",
+        "raw_rho": 0.4047619047619048,
+        "gate_rho": 0.4047619047619048,
+        "feature_variance_nonzero": true,
+        "target_variance_nonzero": true
+      }
+    }
+  },
+  "rho_summary_relative_l2": {
+    "key": {
+      "median_gate_rho": 0.1693125677305195,
+      "median_abs_gate_rho": 0.1693125677305195,
+      "negative_count": 1,
+      "sign_consistent_negative": false,
+      "min_gate_rho": -0.08247860988423225,
+      "max_gate_rho": 0.28288947493050187
+    },
+    "value": {
+      "median_gate_rho": -0.04761904761904763,
+      "median_abs_gate_rho": 0.17360720528879003,
+      "negative_count": 2,
+      "sign_consistent_negative": false,
+      "min_gate_rho": -0.25197631533948484,
+      "max_gate_rho": 0.4047619047619048
+    }
+  },
+  "layer0_diagnostic_raw_rho": {
+    "key": 0.5,
+    "value": -1.0
+  },
+  "gate_result": {
+    "key": {
+      "criterion_a": {
+        "raw_rho_by_task": {
+          "trec": -0.08247860988423225,
+          "lcc": 0.11904761904761905,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "gate_rho_by_task": {
+          "trec": -0.08247860988423225,
+          "lcc": 0.11904761904761905,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "negative_count": 1,
+        "required": 3,
+        "pass": false
+      },
+      "criterion_b": {
+        "raw_rho_by_task": {
+          "trec": -0.08247860988423225,
+          "lcc": 0.11904761904761905,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "gate_rho_by_task": {
+          "trec": -0.08247860988423225,
+          "lcc": 0.11904761904761905,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "median_abs_gate_rho": 0.1693125677305195,
+        "threshold": 0.5,
+        "pass": false
+      },
+      "criterion_c": {
+        "remaining_tasks": [
+          "trec",
+          "passage_retrieval_en",
+          "2wikimqa"
+        ],
+        "raw_rho_remaining": {
+          "trec": -0.08247860988423225,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "gate_rho_remaining": {
+          "trec": -0.08247860988423225,
+          "passage_retrieval_en": 0.28288947493050187,
+          "2wikimqa": 0.21957751641341997
+        },
+        "negative_count": 1,
+        "required_negative_count": 2,
+        "median_remaining_gate_rho": 0.21957751641341997,
+        "pass": false
+      },
+      "criterion_d": {
+        "layer0_raw_rho": 0.5,
+        "layer0_gate_rho": 0.5,
+        "pass": false
+      },
+      "axis_go": false
+    },
+    "value": {
+      "criterion_a": {
+        "raw_rho_by_task": {
+          "trec": null,
+          "lcc": -0.09523809523809526,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "gate_rho_by_task": {
+          "trec": 0.0,
+          "lcc": -0.09523809523809526,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "negative_count": 2,
+        "required": 3,
+        "pass": false
+      },
+      "criterion_b": {
+        "raw_rho_by_task": {
+          "trec": null,
+          "lcc": -0.09523809523809526,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "gate_rho_by_task": {
+          "trec": 0.0,
+          "lcc": -0.09523809523809526,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "median_abs_gate_rho": 0.17360720528879003,
+        "threshold": 0.5,
+        "pass": false
+      },
+      "criterion_c": {
+        "remaining_tasks": [
+          "trec",
+          "passage_retrieval_en",
+          "2wikimqa"
+        ],
+        "raw_rho_remaining": {
+          "trec": null,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "gate_rho_remaining": {
+          "trec": 0.0,
+          "passage_retrieval_en": -0.25197631533948484,
+          "2wikimqa": 0.4047619047619048
+        },
+        "negative_count": 1,
+        "required_negative_count": 2,
+        "median_remaining_gate_rho": 0.0,
+        "pass": false
+      },
+      "criterion_d": {
+        "layer0_raw_rho": -1.0,
+        "layer0_gate_rho": -1.0,
+        "pass": true
+      },
+      "axis_go": false
+    },
+    "FEATURE_PILOT_STAGE": "NO_GO"
+  },
+  "exploratory_distribution_summary": {
+    "key": {
+      "p99_abs": {
+        "median_gate_rho": -0.09003430858954278,
+        "median_abs_gate_rho": 0.09003430858954278,
+        "negative_count": 4,
+        "sign_consistent_negative": true,
+        "min_gate_rho": -0.10286889997472795,
+        "max_gate_rho": -0.04761904761904763
+      },
+      "outlier_fraction": {
+        "median_gate_rho": 0.029337775300742414,
+        "median_abs_gate_rho": 0.3136396556231362,
+        "negative_count": 2,
+        "sign_consistent_negative": false,
+        "min_gate_rho": -0.28571428571428575,
+        "max_gate_rho": 0.4123930494211612
+      }
+    },
+    "value": {
+      "p99_abs": {
+        "median_gate_rho": -0.04761904761904763,
+        "median_abs_gate_rho": 0.04761904761904763,
+        "negative_count": 2,
+        "sign_consistent_negative": false,
+        "min_gate_rho": -0.14285714285714288,
+        "max_gate_rho": 0.0
+      },
+      "outlier_fraction": {
+        "median_gate_rho": 0.04761904761904763,
+        "median_abs_gate_rho": 0.11061312645391884,
+        "negative_count": 1,
+        "sign_consistent_negative": false,
+        "min_gate_rho": -0.12598815766974242,
+        "max_gate_rho": 0.14285714285714288
+      }
+    }
+  },
+  "loto_descriptive": [
+    {
+      "axis": "key",
+      "removed_task": "trec",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 0,
+      "median_remaining_gate_rho": 0.21957751641341997,
+      "pass": false
+    },
+    {
+      "axis": "key",
+      "removed_task": "lcc",
+      "is_preregistered_criterion_c": true,
+      "negative_count": 1,
+      "median_remaining_gate_rho": 0.21957751641341997,
+      "pass": false
+    },
+    {
+      "axis": "key",
+      "removed_task": "passage_retrieval_en",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 1,
+      "median_remaining_gate_rho": 0.11904761904761905,
+      "pass": false
+    },
+    {
+      "axis": "key",
+      "removed_task": "2wikimqa",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 1,
+      "median_remaining_gate_rho": 0.11904761904761905,
+      "pass": false
+    },
+    {
+      "axis": "value",
+      "removed_task": "trec",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 2,
+      "median_remaining_gate_rho": -0.09523809523809526,
+      "pass": true
+    },
+    {
+      "axis": "value",
+      "removed_task": "lcc",
+      "is_preregistered_criterion_c": true,
+      "negative_count": 1,
+      "median_remaining_gate_rho": 0.0,
+      "pass": false
+    },
+    {
+      "axis": "value",
+      "removed_task": "passage_retrieval_en",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 1,
+      "median_remaining_gate_rho": 0.0,
+      "pass": false
+    },
+    {
+      "axis": "value",
+      "removed_task": "2wikimqa",
+      "is_preregistered_criterion_c": false,
+      "negative_count": 2,
+      "median_remaining_gate_rho": -0.09523809523809526,
+      "pass": true
+    }
+  ]
+}
