@@ -28,6 +28,7 @@ from scripts.run_layer_attention_feature_pilot import (  # noqa: E402 -- reuse, 
     DEFAULT_REQUESTED_STEPS,
     RecordValidationError,
     build_trajectory_plan,
+    filter_plan,
     trajectory_identity,
     validate_record_shape,
 )
@@ -78,17 +79,23 @@ def load_records_from_run_dirs(run_dirs, scope_label):
     return records
 
 
-def validate_collection(primary_root, diagnostic_root, expected_commit=None):
+def _validate_records_against_expected_plan(all_records, expected_plan, run_dirs, expected_commit=None):
+    """Shared core reused by BOTH the full 256/16/272 validator and the
+    selector-filtered partial-plan validator (Part 2, Stage H3C-CANARY):
+    per-record structural validity (reused, never reimplemented), locked
+    requested-step check, exact identity completeness/no-duplicates
+    against `expected_plan`, and manifest provenance. `expected_plan` is a
+    list of trajectory dicts (from build_trajectory_plan() for the full
+    case, or filter_plan(build_trajectory_plan(), ...) for a partial
+    case) -- never independently re-derived.
+
+    Manifest provenance reads the REAL H3B manifest field name
+    (`collection_head`) written by scripts.run_layer_attention_feature_pilot.run_real_collection
+    -- NOT `git_commit` (a pre-H3B placeholder key this function used to
+    check, which never matched any real manifest ever produced).
+    """
     problems = []
 
-    primary_run_dirs = discover_run_dirs(primary_root)
-    diagnostic_run_dirs = discover_run_dirs(diagnostic_root)
-
-    primary_records = load_records_from_run_dirs(primary_run_dirs, "primary")
-    diagnostic_records = load_records_from_run_dirs(diagnostic_run_dirs, "diagnostic")
-    all_records = primary_records + diagnostic_records
-
-    # Per-record structural validation (reused, not reimplemented).
     per_record_ok = 0
     for loc, record in all_records:
         try:
@@ -104,8 +111,7 @@ def validate_collection(primary_root, diagnostic_root, expected_commit=None):
         if record.get("requested_decode_steps") != [1, 2, 4, 8, 16]:
             problems.append(f"{loc}: requested_decode_steps != [1,2,4,8,16]: {record.get('requested_decode_steps')}")
 
-    # Identity completeness / duplicates.
-    expected_identities = {trajectory_identity(t) for t in build_trajectory_plan()}
+    expected_identities = {trajectory_identity(t) for t in expected_plan}
     seen_identities = {}
     for loc, record in all_records:
         identity = (record.get("task"), record.get("dataset_index"), record.get("layer_idx"), record.get("tensor_axis"))
@@ -119,22 +125,45 @@ def validate_collection(primary_root, diagnostic_root, expected_commit=None):
     if missing:
         problems.append(f"missing {len(missing)} expected identities: {sorted(missing)[:10]}{'...' if len(missing) > 10 else ''}")
     if extra:
-        problems.append(f"found {len(extra)} unexpected identities not in the trajectory plan: {sorted(extra)[:10]}{'...' if len(extra) > 10 else ''}")
+        problems.append(f"found {len(extra)} unexpected identities not in the expected plan: {sorted(extra)[:10]}{'...' if len(extra) > 10 else ''}")
 
-    # 24 unique prompt identities (task, dataset_index) -- descriptive check.
-    prompt_identities = {(r.get("task"), r.get("dataset_index")) for _, r in all_records}
-
-    # Manifest commit provenance (if any manifest.json exists in the discovered run dirs).
-    manifest_commit_problems = []
-    for run_dir in primary_run_dirs + diagnostic_run_dirs:
+    manifest_problems = []
+    manifests = []
+    for run_dir in run_dirs:
         manifest_path = os.path.join(run_dir, "manifest.json")
         if os.path.exists(manifest_path):
             with open(manifest_path, "r", encoding="utf-8") as f:
                 manifest = json.load(f)
-            commit = manifest.get("git_commit")
+            manifests.append((manifest_path, manifest))
+            commit = manifest.get("collection_head")
             if expected_commit is not None and commit != expected_commit:
-                manifest_commit_problems.append(f"{manifest_path}: git_commit={commit!r} != expected {expected_commit!r}")
-    problems.extend(manifest_commit_problems)
+                manifest_problems.append(f"{manifest_path}: collection_head={commit!r} != expected {expected_commit!r}")
+    problems.extend(manifest_problems)
+
+    return {
+        "problems": problems,
+        "per_record_ok": per_record_ok,
+        "expected_identities": expected_identities,
+        "seen_identities": seen_identities,
+        "manifests": manifests,
+    }
+
+
+def validate_collection(primary_root, diagnostic_root, expected_commit=None):
+    primary_run_dirs = discover_run_dirs(primary_root)
+    diagnostic_run_dirs = discover_run_dirs(diagnostic_root)
+
+    primary_records = load_records_from_run_dirs(primary_run_dirs, "primary")
+    diagnostic_records = load_records_from_run_dirs(diagnostic_run_dirs, "diagnostic")
+    all_records = primary_records + diagnostic_records
+
+    core = _validate_records_against_expected_plan(
+        all_records, build_trajectory_plan(), primary_run_dirs + diagnostic_run_dirs, expected_commit
+    )
+    problems = core["problems"]
+
+    # 24 unique prompt identities (task, dataset_index) -- descriptive check.
+    prompt_identities = {(r.get("task"), r.get("dataset_index")) for _, r in all_records}
 
     result = {
         "primary_run_dirs": primary_run_dirs,
@@ -145,10 +174,10 @@ def validate_collection(primary_root, diagnostic_root, expected_commit=None):
         "expected_primary_count": 256,
         "expected_diagnostic_count": 16,
         "expected_total_count": 272,
-        "per_record_structurally_valid": per_record_ok,
+        "per_record_structurally_valid": core["per_record_ok"],
         "unique_prompt_identities": len(prompt_identities),
         "expected_unique_prompt_identities": 24,
-        "unique_scientific_identities": len(seen_identities),
+        "unique_scientific_identities": len(core["seen_identities"]),
         "expected_scientific_identities": 272,
         "problems": problems,
         "ok": (
@@ -156,6 +185,71 @@ def validate_collection(primary_root, diagnostic_root, expected_commit=None):
             and len(primary_records) == 256
             and len(diagnostic_records) == 16
             and len(prompt_identities) == 24
+        ),
+    }
+    return result
+
+
+def validate_partial_collection(output_root, scope_label, expected_plan, expected_commit=None):
+    """Stage H3C-CANARY (Part 2): strict read-only validation for a
+    SELECTOR-FILTERED SUBSET of the full 272-trajectory plan -- e.g. the
+    exact single-trajectory canaries this stage runs. Does NOT assume
+    256/16/272; the caller supplies `expected_plan` (typically
+    filter_plan(build_trajectory_plan(), ...)) so the expected identity
+    set is EXACT, never "at least one row exists".
+
+    Also validates manifest planned_count/completed_count/state (COMPLETE)
+    -- the full validate_collection() does not check this today because
+    Stage G's manifest never had a lifecycle state; H3B's does.
+
+    `output_root` is a single canary run root (e.g.
+    outputs/layer_attention_feature_runner_canary/h3c_key_l0_lcc122) --
+    this function discovers run-dirs under it exactly like the full
+    validator (discover_run_dirs), supporting a resumed run across
+    multiple run-label subdirectories.
+    """
+    if not expected_plan:
+        raise ValueError("expected_plan must not be empty -- a partial validator with no expectation validates nothing")
+
+    run_dirs = discover_run_dirs(output_root)
+    records = load_records_from_run_dirs(run_dirs, scope_label)
+
+    core = _validate_records_against_expected_plan(records, expected_plan, run_dirs, expected_commit)
+    problems = list(core["problems"])
+
+    manifest_problems = []
+    manifest_states = []
+    for manifest_path, manifest in core["manifests"]:
+        manifest_states.append(manifest.get("state"))
+        if manifest.get("planned_count") != len(expected_plan):
+            manifest_problems.append(
+                f"{manifest_path}: planned_count={manifest.get('planned_count')!r} != expected {len(expected_plan)}"
+            )
+        if manifest.get("completed_count") != len(expected_plan):
+            manifest_problems.append(
+                f"{manifest_path}: completed_count={manifest.get('completed_count')!r} != expected {len(expected_plan)}"
+            )
+        if manifest.get("state") != "COMPLETE":
+            manifest_problems.append(f"{manifest_path}: state={manifest.get('state')!r} != 'COMPLETE'")
+    problems.extend(manifest_problems)
+
+    manifest_found = len(core["manifests"]) > 0
+    if not manifest_found:
+        problems.append(f"no manifest.json found under any run dir in {output_root!r}")
+
+    result = {
+        "output_root": output_root,
+        "run_dirs": run_dirs,
+        "record_count": len(records),
+        "expected_count": len(expected_plan),
+        "per_record_structurally_valid": core["per_record_ok"],
+        "unique_scientific_identities": len(core["seen_identities"]),
+        "manifest_states": manifest_states,
+        "problems": problems,
+        "ok": (
+            not problems
+            and len(records) == len(expected_plan)
+            and manifest_found
         ),
     }
     return result

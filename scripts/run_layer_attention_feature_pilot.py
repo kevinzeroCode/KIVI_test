@@ -2,17 +2,21 @@
 
 Implements the locked Stage-H design (docs/stage_h0_pre_registration.md,
 Stage H0-DECODE-AUDIT, Stage H0-PRE) for the full 272-trajectory
-collection. THIS ROUND: CPU trajectory planning / record schema / resume
-logic is complete and tested; --dry-run is fully implemented and
-torch-free (verified: does not import torch/transformers). The real GPU
-collection entry point is deliberately NOT implemented in this round --
-main() refuses to run without --dry-run -- so there is no code path here
-that could accidentally launch GPU work. Its design (reusing the
-H2-canary-validated capture pattern: a scoped spy on
-_apply_rotary_pos_emb_inplace + nn.functional.softmax installed only
-around the target layer's own forward(), q_proj/v_proj/o_proj hooks, a
-past_key_value pre-hook) is described in the Stage-H3 final report, to be
-implemented as a separate, explicitly-authorized next step.
+collection.
+
+Stage H3A: CPU trajectory planning / record schema / resume logic /
+--dry-run (torch-free -- verified: does not import torch/transformers).
+
+Stage H3B (this round): the real GPU collection entry point (--run) is
+now implemented, reusing H2's already-GPU-validated capture/reconstruction
+functions directly (scripts.h2_attention_decode_parity_canary -- a scoped
+spy on _apply_rotary_pos_emb_inplace + nn.functional.softmax installed
+only around the target layer's own forward(), q_proj/v_proj/o_proj hooks,
+reconstruct_key_step/reconstruct_value_step) rather than reimplementing
+any of it. main() still requires an EXPLICIT --run flag (plus --scope) to
+touch the GPU; omitting both --dry-run and --run refuses with an error.
+NOTHING in this repository invokes --run this round -- see the Stage H3B
+final report's explicit "DO NOT RUN GPU" confirmation.
 
 Reuses, never reimplements:
   - utils.attention_decode_features (key_decode_distortion,
@@ -96,6 +100,12 @@ LOCKED_SAMPLE_SELECTION = OrderedDict(
         ("samsum", (58, 118, 151, 52)),
     ]
 )
+
+# Frozen historical provenance references (never derived at runtime -- the
+# live collection HEAD will necessarily be a later commit once this file
+# itself is committed). See docs/stage_h0_pre_registration.md.
+PREREGISTRATION_COMMIT = "c22881c9426a6e547f17b0f4c2c7598ec92c7a2b"  # "Preregister decode-aware attention feature pilot"
+MEASUREMENT_PIPELINE_COMMIT = "1a3f2872b41939001ccb96cea068a2ecde26fc98"  # "Add decode-aware attention pilot infrastructure" (H1/H2/H3A)
 
 CONFLICTING_PROCESS_PATTERNS = [
     "pred_long_bench.py",
@@ -212,6 +222,32 @@ def validate_policy_bits(axis, k_bits, v_bits):
         raise PilotConfigError(f"unknown axis {axis!r}; must be 'key' or 'value'")
     if (k_bits, v_bits) != expected:
         raise PilotConfigError(f"axis {axis!r} requires (k_bits,v_bits)={expected}, got ({k_bits},{v_bits})")
+
+
+def filter_plan(plan, scope=None, layer=None, axis=None, task=None, dataset_index=None, max_trajectories=None):
+    """Part 15: pure, torch-free selector filtering shared by --dry-run and
+    the real collector -- a single-trajectory or single-group debugging
+    run uses exactly this same function (and the exact same downstream
+    execution path) as the full 272-trajectory run, never a separate toy
+    implementation. Filters are applied in the order listed; order does
+    not affect the result since each is an independent predicate.
+    `max_trajectories` truncates the already-filtered, deterministically-
+    ordered plan (never reorders it).
+    """
+    out = plan
+    if scope is not None:
+        out = [t for t in out if t["scope"] == scope]
+    if layer is not None:
+        out = [t for t in out if t["layer_idx"] == layer]
+    if axis is not None:
+        out = [t for t in out if t["tensor_axis"] == axis]
+    if task is not None:
+        out = [t for t in out if t["task"] == task]
+    if dataset_index is not None:
+        out = [t for t in out if t["dataset_index"] == dataset_index]
+    if max_trajectories is not None:
+        out = out[:max_trajectories]
+    return out
 
 
 def group_trajectories_by_policy(plan):
@@ -469,6 +505,392 @@ def gpu_preflight(threshold_bytes=10 * 1024**3):
 
 
 # ---------------------------------------------------------------------------
+# Torch-free provenance helpers (real-collection preflight only; small,
+# deliberately duplicated subprocess wrappers -- not scientific logic, so
+# duplicating scripts.h2_attention_decode_parity_canary's equivalents here
+# avoids an import that would transitively pull in torch before the git/
+# process/GPU checks have even run).
+# ---------------------------------------------------------------------------
+
+def get_git_status_short():
+    try:
+        return subprocess.check_output(["git", "status", "--short"], cwd=REPO_ROOT, stderr=subprocess.DEVNULL).decode()
+    except Exception:
+        return None
+
+
+def get_git_commit():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=REPO_ROOT, stderr=subprocess.DEVNULL).decode().strip()
+    except Exception:
+        return None
+
+
+def get_boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id", "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Part 12/18: manifest lifecycle + compact per-trajectory logging
+# ---------------------------------------------------------------------------
+
+def write_manifest(manifest_path, manifest):
+    """Atomic write (tmp + fsync + os.replace) -- a reader never observes a
+    half-written manifest."""
+    os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
+    tmp_path = manifest_path + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, manifest_path)
+
+
+def append_log(log_path, msg):
+    line = f"{datetime.now(timezone.utc).isoformat()} {msg}"
+    os.makedirs(os.path.dirname(log_path), exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+    print(line)
+
+
+def trajectory_log_line(trajectory, status, generated_token_count=None, sampled_decode_steps=None, sample_attention_distortion=None, elapsed_s=None):
+    """Part 18: compact, no-scientific-interpretation per-trajectory log
+    entry -- identity + status + shape only, never a tensor."""
+    return (
+        f"scope={trajectory['scope']} task={trajectory['task']} dataset_index={trajectory['dataset_index']} "
+        f"layer={trajectory['layer_idx']} axis={trajectory['tensor_axis']} status={status} "
+        f"generated_tokens={generated_token_count} valid_steps={sampled_decode_steps} "
+        f"distortion={sample_attention_distortion} elapsed_s={elapsed_s}"
+    )
+
+
+def append_validated_record(features_path, record):
+    """Part 10: validate BEFORE write, fail closed (raises, writes
+    nothing) on any structural problem. Append-only, flush+fsync so a
+    completed record survives an abrupt process termination."""
+    validate_record_shape(record)
+    os.makedirs(os.path.dirname(features_path), exist_ok=True)
+    with open(features_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+
+
+# ---------------------------------------------------------------------------
+# Part 3/4/5: real collection -- default (GPU-touching) backend
+# ---------------------------------------------------------------------------
+
+def default_load_model_fn(model_name_or_path, cache_dir, layer_idx, k_bits, v_bits, seed, group_size, residual_length):
+    """Loads ONE fixed (layer_idx, k_bits, v_bits) policy, reusing H2's
+    already-GPU-validated scripts.h2_attention_decode_parity_canary.load_canary_model
+    verbatim (never reimplemented). Deferred import keeps --dry-run and
+    the CPU-mock orchestration tests (Part 16, dependency-injected)
+    torch-free."""
+    from scripts.h2_attention_decode_parity_canary import load_canary_model
+
+    model, tokenizer, model_class_name = load_canary_model(
+        model_name_or_path, cache_dir, k_bits, v_bits, seed,
+        layer_idx=layer_idx, group_size=group_size, residual_length=residual_length,
+    )
+    model_short_name = model_name_or_path.split("/")[-1]
+    return {"model": model, "tokenizer": tokenizer, "model_class_name": model_class_name, "model_short_name": model_short_name}
+
+
+def default_release_model_fn(model_handle):
+    """Part 13: release between policy groups -- del the real references,
+    then a best-effort gc/cuda cleanup (cleanup only, never a substitute
+    for the del above)."""
+    import gc
+
+    model = model_handle.pop("model", None)
+    del model
+    model_handle.clear()
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+_REAL_DATASET_CACHE_TASK_KEY = "_dataset"
+
+
+def _get_dataset(task, dataset_cache):
+    if task not in dataset_cache:
+        from datasets import load_dataset
+
+        dataset_cache[task] = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True)
+    return dataset_cache[task]
+
+
+def default_run_trajectory_fn(model_handle, trajectory, dataset_cache, max_new_tokens_horizon, group_size):
+    """Part 3/5/6/7/8: runs exactly ONE trajectory against an already-
+    loaded model_handle, with fully fresh state (a brand-new ShadowKVCache,
+    a brand-new LayerCallCapture via generate_with_capture, fresh decode-
+    step counters/metric accumulator -- nothing carried over from any
+    other trajectory). Reuses, never reinvents:
+      - scripts.h2_attention_decode_parity_canary.{build_prompt,
+        generate_with_capture, reconstruct_key_step, reconstruct_value_step}
+        (the exact GPU-validated H2 capture/reconstruction path)
+      - utils.attention_decode_features.{ShadowKVCache, key_decode_distortion,
+        value_decode_distortion} (the exact locked measurement formulas)
+      - utils.generation_semantics.resolve_generate_kwargs (real per-task
+        generation kwargs, including samsum's min_length/eos_token_id --
+        only max_new_tokens is overridden down to the Stage-H horizon; every
+        other task-specific kwarg passes through unmodified).
+    Returns a dict of the raw scalars build_trajectory_record() needs
+    (never a tensor/matrix/cache) plus the executed step_distortions.
+    """
+    import json as _json
+
+    from scripts.h2_attention_decode_parity_canary import (
+        build_prompt,
+        generate_with_capture,
+        reconstruct_key_step,
+        reconstruct_value_step,
+    )
+    from utils.attention_decode_features import ShadowKVCache, key_decode_distortion, value_decode_distortion
+    from utils.generation_semantics import resolve_generate_kwargs
+
+    model = model_handle["model"]
+    tokenizer = model_handle["tokenizer"]
+    model_short_name = model_handle["model_short_name"]
+
+    task = trajectory["task"]
+    dataset_index = trajectory["dataset_index"]
+    layer_idx = trajectory["layer_idx"]
+    axis = trajectory["tensor_axis"]
+    k_bits, v_bits = trajectory["k_bits"], trajectory["v_bits"]
+
+    dataset = _get_dataset(task, dataset_cache)
+    if not (0 <= dataset_index < len(dataset)):
+        raise PilotConfigError(f"dataset_index {dataset_index} out of range for task {task!r} (len={len(dataset)}) -- refusing to load a shifted row")
+    json_obj = dataset[dataset_index]  # identity verified by the bounds check above; index is never re-derived
+
+    prompt = build_prompt(tokenizer, model_short_name, json_obj, task=task)
+
+    with open(os.path.join(REPO_ROOT, "config", "dataset2maxlen.json"), "r", encoding="utf-8") as f:
+        dataset2maxlen = _json.load(f)
+    inp = tokenizer(prompt, truncation=False, return_tensors="pt")
+    context_length = inp.input_ids.shape[-1]
+    full_kwargs = resolve_generate_kwargs(task, tokenizer, context_length, dataset2maxlen[task])
+    # Truncate the generation horizon only; every other task-specific kwarg
+    # (samsum's min_length/eos_token_id) passes through unmodified -- greedy
+    # decoding is prefix-deterministic, so this reproduces an exact prefix
+    # of what the full-length task generation would produce (established
+    # generically for the un-truncated-kwargs case by H2's
+    # horizon_prefix_match check).
+    max_new_tokens = min(full_kwargs.pop("max_new_tokens"), max_new_tokens_horizon)
+    full_kwargs.pop("num_beams", None)
+    full_kwargs.pop("do_sample", None)
+    full_kwargs.pop("temperature", None)
+    full_kwargs.pop("top_p", None)
+    extra_kwargs = full_kwargs  # only samsum contributes anything here (min_length, eos_token_id)
+
+    generated_ids, layer_capture, prompt_input_tokens = generate_with_capture(
+        model, tokenizer, prompt, max_new_tokens, capture=True, layer_idx=layer_idx, extra_generate_kwargs=extra_kwargs,
+    )
+
+    calls = layer_capture.calls
+    assert len(calls) >= 1, "fresh LayerCallCapture produced no calls -- capture state was not actually fresh"
+    attn = model.model.layers[layer_idx].self_attn
+    head_dim = attn.head_dim
+    num_kv_heads = attn.num_key_value_heads
+    for call in calls:
+        raw_v = call["v_proj_raw"]
+        q_len = raw_v.shape[1]
+        call["v_current"] = raw_v.view(raw_v.shape[0], q_len, num_kv_heads, head_dim).transpose(1, 2).contiguous()
+
+    prefill_call = calls[0]
+    decode_calls = calls[1:]
+
+    shadow = ShadowKVCache()
+    assert shadow.token_count == 0, "fresh ShadowKVCache was not actually empty before seeding"
+    shadow.seed_prefill(prefill_call["k_post_rope"], prefill_call["v_current"])
+
+    step_distortions = {}
+    for step_idx, call in enumerate(decode_calls, start=1):
+        if axis == "key":
+            L_kivi, L_fp16 = reconstruct_key_step(call, group_size, k_bits, shadow, head_dim, num_kv_heads)
+            step_distortions[step_idx] = key_decode_distortion(L_kivi, L_fp16)
+        else:
+            shadow.append_decode_step(call["k_post_rope"], call["v_current"])
+            O_value_kivi, O_fp16, _ = reconstruct_value_step(call, group_size, v_bits, shadow, head_dim)
+            step_distortions[step_idx] = value_decode_distortion(O_value_kivi, O_fp16)
+
+    del shadow, layer_capture, calls, prefill_call, decode_calls
+    return {
+        "prompt_input_tokens": prompt_input_tokens,
+        "actual_generated_token_count": len(generated_ids),
+        "step_distortions": step_distortions,
+    }
+
+
+def run_real_collection(
+    args,
+    load_model_fn=default_load_model_fn,
+    release_model_fn=default_release_model_fn,
+    run_trajectory_fn=default_run_trajectory_fn,
+    git_status_fn=get_git_status_short,
+    git_commit_fn=get_git_commit,
+    boot_id_fn=get_boot_id,
+    conflict_check_fn=check_no_conflicting_process,
+    gpu_preflight_fn=gpu_preflight,
+):
+    """Part 2/4/11/12/14/19: the real (or, under test, dependency-injected
+    fake) execution path. Every check up to and including the GPU
+    preflight is torch-free and runs BEFORE any of the injected backend
+    functions is called, so a refusal never triggers a model load.
+
+    Fixed-policy grouping (Part 4): one load_model_fn call per (scope,
+    layer_idx, tensor_axis) group with at least one remaining trajectory;
+    release_model_fn is called exactly once when a group finishes, before
+    the next group's load_model_fn call -- never two model handles alive
+    at once.
+    """
+    git_status = git_status_fn()
+    if git_status is None:
+        raise PilotConfigError("could not determine git status; refusing real scientific collection for provenance safety")
+    if git_status.strip():
+        raise PilotConfigError(
+            "git working tree is not clean; refusing real scientific collection so every record's "
+            f"git_commit is trustworthy provenance. git status --short:\n{git_status}"
+        )
+    collection_head = git_commit_fn()
+    if not collection_head:
+        raise PilotConfigError("could not determine git HEAD commit; refusing real scientific collection")
+
+    conflicts = conflict_check_fn()
+    if conflicts:
+        raise PilotLockError(f"conflicting process(es) detected, refusing to launch: {conflicts}")
+
+    preflight = gpu_preflight_fn()
+    if preflight.get("warning"):
+        # No override flag exists (deliberate Stage H3B scope choice --
+        # see the final report): a busy GPU always refuses, unconditionally.
+        raise PilotConfigError(f"GPU preflight refused real scientific launch: {preflight['warning']}")
+
+    if args.scope is None:
+        raise PilotConfigError("--scope {primary,diagnostic} is required for --run so primary/diagnostic outputs are never mixed under one output root")
+
+    plan = build_trajectory_plan()
+    plan = filter_plan(
+        plan, scope=args.scope, layer=args.layer, axis=args.axis, task=args.task,
+        dataset_index=args.dataset_index, max_trajectories=args.max_trajectories,
+    )
+    if not plan:
+        raise PilotConfigError("the requested selectors produced an empty trajectory plan; nothing to run")
+    for _t in plan:
+        validate_policy_bits(_t["tensor_axis"], _t["k_bits"], _t["v_bits"])
+    if args.layer is None:
+        # Full scope guard only applies when the caller hasn't deliberately
+        # narrowed to a single layer via --layer (a legitimate debugging
+        # selector, Part 15).
+        validate_scope_guard(args.scope, sorted({t["layer_idx"] for t in plan}))
+
+    output_root = args.output_root or (DEFAULT_OUTPUT_ROOT_PRIMARY if args.scope == "primary" else DEFAULT_OUTPUT_ROOT_DIAGNOSTIC)
+    run_label = args.run_label or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    run_dir = os.path.join(output_root, run_label)
+    os.makedirs(run_dir, exist_ok=True)
+    features_path = os.path.join(run_dir, "features.jsonl")
+    manifest_path = os.path.join(run_dir, "manifest.json")
+    log_path = os.path.join(run_dir, "collection.log")
+
+    lock_fh = acquire_pilot_lock(os.path.join(run_dir, "pilot.lock"))
+    try:
+        completed = load_completed_records(features_path, expected_git_commit=collection_head)  # fail-closed (Part 11)
+        remaining = plan_remaining_trajectories(plan, set(completed.keys()))
+
+        manifest = {
+            "scope": args.scope,
+            "collection_head": collection_head,
+            "preregistration_commit": PREREGISTRATION_COMMIT,
+            "measurement_pipeline_commit": MEASUREMENT_PIPELINE_COMMIT,
+            "planned_count": len(plan),
+            "completed_count": len(completed),
+            "skipped_resumed_count": len(completed),
+            "failure_identity": None,
+            "start_boot_id": boot_id_fn(),
+            "end_boot_id": None,
+            "nonfinite_status": "not_detected",
+            "exit_status": None,
+            "state": "RUNNING",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "ended_at": None,
+        }
+        write_manifest(manifest_path, manifest)
+        append_log(log_path, f"collection start scope={args.scope} planned={len(plan)} already_completed={len(completed)} remaining={len(remaining)}")
+
+        dataset_cache = {}
+        groups = group_trajectories_by_policy(remaining)
+        current_trajectory = None  # tracks the in-progress trajectory for accurate failure-identity reporting
+        try:
+            for (scope, layer_idx, axis), members in groups.items():
+                current_trajectory = None  # reset: a load_model_fn failure must not misattribute to the previous group's last trajectory
+                append_log(log_path, f"loading model for policy group scope={scope} layer={layer_idx} axis={axis} ({len(members)} trajectories)")
+                model_handle = load_model_fn(
+                    args.model_name_or_path, args.cache_dir, layer_idx, members[0]["k_bits"], members[0]["v_bits"],
+                    args.seed, args.group_size, args.residual_length,
+                )
+                try:
+                    for t in members:
+                        current_trajectory = t
+                        t0 = datetime.now(timezone.utc)
+                        result = run_trajectory_fn(model_handle, t, dataset_cache, args.max_new_tokens, args.group_size)
+                        elapsed_s = (datetime.now(timezone.utc) - t0).total_seconds()
+                        record = build_trajectory_record(
+                            t, args.model_name_or_path, collection_head, args.seed,
+                            result["prompt_input_tokens"], result["actual_generated_token_count"], result["step_distortions"],
+                        )
+                        append_validated_record(features_path, record)  # Part 10: fail-closed before write
+                        manifest["completed_count"] += 1
+                        write_manifest(manifest_path, manifest)
+                        append_log(log_path, trajectory_log_line(
+                            t, "completed", result["actual_generated_token_count"],
+                            record["sampled_decode_steps"], record["sample_attention_distortion"], round(elapsed_s, 3),
+                        ))
+                        current_trajectory = None  # this trajectory is now durably recorded; not "in progress" anymore
+                finally:
+                    release_model_fn(model_handle)
+        except Exception as e:  # noqa: BLE001 -- fail closed: preserve records/logs, write failure state, never fabricate
+            failed_identity = trajectory_identity(current_trajectory) if current_trajectory is not None else None
+            manifest["failure_identity"] = list(failed_identity) if failed_identity else None
+            manifest["state"] = "FAILED"
+            manifest["exit_status"] = f"{type(e).__name__}: {e}"
+            manifest["end_boot_id"] = boot_id_fn()
+            manifest["ended_at"] = datetime.now(timezone.utc).isoformat()
+            write_manifest(manifest_path, manifest)
+            append_log(log_path, f"FAILED identity={failed_identity} error={type(e).__name__}: {e}")
+            raise
+
+        final_completed = load_completed_records(features_path, expected_git_commit=collection_head)
+        final_identities = set(final_completed.keys())
+        expected_identities = {trajectory_identity(t) for t in plan}
+        manifest["completed_count"] = len(final_completed)
+        manifest["end_boot_id"] = boot_id_fn()
+        manifest["ended_at"] = datetime.now(timezone.utc).isoformat()
+        if final_identities == expected_identities:
+            manifest["state"] = "COMPLETE"
+            manifest["exit_status"] = "ok"
+        else:
+            manifest["state"] = "FAILED"
+            manifest["exit_status"] = f"planned count did not validate: expected {len(expected_identities)}, got {len(final_identities)}"
+        write_manifest(manifest_path, manifest)
+        append_log(log_path, f"collection end state={manifest['state']} completed={manifest['completed_count']}/{manifest['planned_count']}")
+        return 0 if manifest["state"] == "COMPLETE" else 1
+    finally:
+        release_pilot_lock(lock_fh)
+
+
+# ---------------------------------------------------------------------------
 # Dry-run
 # ---------------------------------------------------------------------------
 
@@ -529,23 +951,45 @@ def parse_args(argv=None):
     p.add_argument("--max-new-tokens", type=int, default=DEFAULT_MAX_NEW_TOKENS_HORIZON)
     p.add_argument("--seed", type=int, default=DEFAULT_SEED)
     p.add_argument("--run_label", default=None)
-    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--dry-run", action="store_true", help="CPU-only planning report. Torch-free. Mutually exclusive with --run.")
+    p.add_argument("--run", action="store_true", help="Real scientific GPU collection. Requires --scope. See Part 22: NOT invoked by anything in this round.")
+    # Part 15: safe debugging/execution selectors. These narrow the SAME
+    # trajectory plan/execution path used by the full run -- a 1-trajectory
+    # or 1-group debugging run is never a separate toy implementation.
+    p.add_argument("--layer", type=int, default=None, help="Restrict to one layer_idx.")
+    p.add_argument("--axis", choices=["key", "value"], default=None, help="Restrict to one tensor_axis.")
+    p.add_argument("--task", default=None, help="Restrict to one LongBench task.")
+    p.add_argument("--dataset-index", type=int, default=None, help="Restrict to one dataset_index.")
+    p.add_argument("--max-trajectories", type=int, default=None, help="Truncate the (already-filtered) plan to at most N trajectories.")
     return p.parse_args(argv)
 
 
 def main():
     args = parse_args()
 
-    if not args.dry_run:
-        print(
-            "Real Stage-H scientific collection is implemented but was NOT invoked this round "
-            "(explicitly out of scope -- CPU tests + dry-run only). Refusing to proceed without "
-            "--dry-run.",
-            file=sys.stderr,
-        )
+    if args.dry_run and args.run:
+        print("--dry-run and --run are mutually exclusive.", file=sys.stderr)
         return 1
 
-    return print_dry_run_report(scope_filter=args.scope)
+    if args.dry_run:
+        return print_dry_run_report(scope_filter=args.scope)
+
+    if args.run:
+        # Part 22: this call is real and would touch the GPU -- nothing in
+        # this repository invokes main() with --run this round.
+        try:
+            return run_real_collection(args)
+        except (PilotConfigError, PilotLockError, ResumeError) as e:
+            print(f"Refusing real scientific collection: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+
+    print(
+        "Neither --dry-run nor --run was given. Real Stage-H scientific collection requires the "
+        "explicit --run flag (plus --scope); GPU collection never happens merely because --dry-run "
+        "is absent. Refusing to proceed.",
+        file=sys.stderr,
+    )
+    return 1
 
 
 if __name__ == "__main__":

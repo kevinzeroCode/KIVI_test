@@ -231,19 +231,33 @@ class LayerCallCapture:
         return raw.view(bsz, q_len, self.num_kv_heads, self.head_dim).transpose(1, 2).contiguous()
 
 
-def build_prompt(tokenizer, model_short_name, json_obj):
+def build_prompt(tokenizer, model_short_name, json_obj, task=CANARY_TASK):
+    """`task` defaults to CANARY_TASK so every existing H2 call site (which
+    never passes it) is byte-identical to before this parameter was added.
+    Generalized (Stage H3B) so scripts/run_layer_attention_feature_pilot.py
+    can reuse this exact prompt-construction logic for any of the 6
+    Stage-H tasks instead of reimplementing it."""
     import pred_long_bench as plb
     from utils.generation_semantics import NO_BUILD_CHAT_DATASETS
 
     with open(os.path.join(REPO_ROOT, "config", "dataset2prompt.json"), "r", encoding="utf-8") as f:
         dataset2prompt = json.load(f)
-    prompt = dataset2prompt[CANARY_TASK].format(**json_obj)
-    if CANARY_TASK not in NO_BUILD_CHAT_DATASETS:
+    prompt = dataset2prompt[task].format(**json_obj)
+    if task not in NO_BUILD_CHAT_DATASETS:
         prompt = plb.build_chat(tokenizer, prompt, model_short_name)
     return prompt
 
 
-def load_canary_model(model_name_or_path, cache_dir, k_bits, v_bits, seed):
+def load_canary_model(
+    model_name_or_path, cache_dir, k_bits, v_bits, seed,
+    layer_idx=CANARY_LAYER, group_size=CANARY_GROUP_SIZE, residual_length=CANARY_RESIDUAL_LENGTH,
+):
+    """`layer_idx`/`group_size`/`residual_length` default to the exact H2
+    canary constants so every existing H2 call site (which never passes
+    them) is byte-identical to before these parameters were added.
+    Generalized (Stage H3B) so the scientific collector can load any of
+    the 8 primary layers under this exact same, already-validated
+    model-construction path -- never an independent reimplementation."""
     import torch
     import pred_long_bench as plb
 
@@ -252,7 +266,7 @@ def load_canary_model(model_name_or_path, cache_dir, k_bits, v_bits, seed):
     policy_obj = {
         "policy_name": "h0_attention_decode_canary",
         "default": {"k_bits": 16, "v_bits": 16, "family": "kivi"},
-        "overrides": {str(CANARY_LAYER): {"k_bits": k_bits, "v_bits": v_bits, "family": "kivi"}},
+        "overrides": {str(layer_idx): {"k_bits": k_bits, "v_bits": v_bits, "family": "kivi"}},
     }
     resolved = resolve_layer_policy(probe_config.num_hidden_layers, 16, 16, policy_obj)
 
@@ -260,8 +274,8 @@ def load_canary_model(model_name_or_path, cache_dir, k_bits, v_bits, seed):
     model_args.model_name_or_path = model_name_or_path
     model_args.k_bits = 16
     model_args.v_bits = 16
-    model_args.group_size = CANARY_GROUP_SIZE
-    model_args.residual_length = CANARY_RESIDUAL_LENGTH
+    model_args.group_size = group_size
+    model_args.residual_length = residual_length
     training_args = _Args()
     training_args.cache_dir = cache_dir
     dtype = torch.float16
@@ -270,12 +284,12 @@ def load_canary_model(model_name_or_path, cache_dir, k_bits, v_bits, seed):
         model_args, training_args, dtype, use_kivi_model=True, resolved_layer_policy=resolved
     )
     model.eval()
-    attn = model.model.layers[CANARY_LAYER].self_attn
+    attn = model.model.layers[layer_idx].self_attn
     got = (attn.k_bits, attn.v_bits)
     if got != (k_bits, v_bits):
-        raise CanaryError(f"layer {CANARY_LAYER} policy mismatch: expected {(k_bits, v_bits)}, got {got}")
+        raise CanaryError(f"layer {layer_idx} policy mismatch: expected {(k_bits, v_bits)}, got {got}")
     for i, l in enumerate(model.model.layers):
-        if i == CANARY_LAYER:
+        if i == layer_idx:
             continue
         g = (l.self_attn.k_bits, l.self_attn.v_bits)
         if g != (16, 16):
@@ -283,10 +297,18 @@ def load_canary_model(model_name_or_path, cache_dir, k_bits, v_bits, seed):
     return model, tokenizer, model_class_name
 
 
-def generate_with_capture(model, tokenizer, prompt, max_new_tokens, capture=True):
+def generate_with_capture(model, tokenizer, prompt, max_new_tokens, capture=True, layer_idx=CANARY_LAYER, extra_generate_kwargs=None):
+    """`layer_idx`/`extra_generate_kwargs` default to CANARY_LAYER/None so
+    every existing H2 call site (which never passes them) issues the exact
+    same model.generate() call as before these parameters were added.
+    Generalized (Stage H3B) so the scientific collector can target any
+    layer and pass task-specific generation kwargs (e.g. samsum's
+    min_length/eos_token_id, via utils.generation_semantics) through this
+    same fresh-hook-state-per-call path, rather than reimplementing it."""
     import torch
 
-    attn = model.model.layers[CANARY_LAYER].self_attn
+    extra_generate_kwargs = extra_generate_kwargs or {}
+    attn = model.model.layers[layer_idx].self_attn
     layer_capture = LayerCallCapture(attn, attn.head_dim, attn.num_key_value_heads) if capture else None
     if capture:
         layer_capture.install_handles()
@@ -294,7 +316,8 @@ def generate_with_capture(model, tokenizer, prompt, max_new_tokens, capture=True
     inp = tokenizer(prompt, truncation=False, return_tensors="pt").to(model.device)
     with torch.no_grad():
         output = model.generate(
-            **inp, max_new_tokens=max_new_tokens, num_beams=1, do_sample=False, temperature=1.0, top_p=1.0
+            **inp, max_new_tokens=max_new_tokens, num_beams=1, do_sample=False, temperature=1.0, top_p=1.0,
+            **extra_generate_kwargs,
         )
     generated_ids = output[0, inp.input_ids.shape[1]:].tolist()
 
