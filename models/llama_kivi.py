@@ -9,6 +9,9 @@ from torch import nn
 from quant.new_pack import triton_quantize_and_pack_along_last_dim
 from quant.matmul import cuda_bmm_fA_qB_outer
 
+from utils.hadamard import HadamardError, apply_hadamard_rotation, get_normalized_hadamard, is_power_of_two
+from utils.layer_policy import SUPPORTED_FAMILIES
+
 from transformers.models.llama.configuration_llama import *
 from transformers.models.llama.modeling_llama import *
 from transformers.modeling_attn_mask_utils import _prepare_4d_causal_attention_mask
@@ -136,30 +139,35 @@ def _apply_rotary_pos_emb_inplace(
 
 
 def _resolve_layer_kv_bits(config, layer_idx):
-    """Resolve (k_bits, v_bits) for one decoder layer.
+    """Resolve (k_bits, v_bits, family) for one decoder layer.
 
     If config.layer_kv_policy is set -- a list of {"k_bits", "v_bits",
     "family"} dicts, one per layer, produced by
     utils.layer_policy.resolve_layer_policy() and validated before model
-    construction -- use this layer's entry (only family == "kivi" is
-    executable; a bit width of 16 under "kivi" is the existing
-    FP16/pass-through route, not a distinct quantizer).
+    construction -- use this layer's entry. family must be one of
+    utils.layer_policy.SUPPORTED_FAMILIES (currently "kivi" and, as of
+    Stage I1B, "rotation_kivi" -- the QuaRot-inspired post-RoPE per-head
+    Hadamard Q/K rotation applied to Key-cache quantization only; Value is
+    always standard KIVI regardless of family). A bit width of 16 under
+    either family is the existing FP16/pass-through route, not a distinct
+    quantizer.
 
-    Otherwise fall back to the global config.k_bits/config.v_bits exactly as
-    before per-layer policies existed. This fallback is what keeps every
-    existing global run (k_bits/v_bits set once on the shared config) byte-
-    for-byte unchanged when no --layer_policy is given.
+    Otherwise fall back to the global config.k_bits/config.v_bits (family
+    "kivi") exactly as before per-layer policies existed. This fallback is
+    what keeps every existing global run (k_bits/v_bits set once on the
+    shared config) byte-for-byte unchanged when no --layer_policy is given.
     """
     layer_policy = getattr(config, "layer_kv_policy", None)
     if layer_policy is None:
-        return config.k_bits, config.v_bits
+        return config.k_bits, config.v_bits, "kivi"
     entry = layer_policy[layer_idx]
-    if entry.get("family", "kivi") != "kivi":
+    family = entry.get("family", "kivi")
+    if family not in SUPPORTED_FAMILIES:
         raise ValueError(
-            f"layer {layer_idx}: family={entry.get('family')!r} is not executable "
-            "(only 'kivi' is implemented)"
+            f"layer {layer_idx}: family={family!r} is not executable "
+            f"(supported families: {list(SUPPORTED_FAMILIES)})"
         )
-    return entry["k_bits"], entry["v_bits"]
+    return entry["k_bits"], entry["v_bits"], family
 
 
 class LlamaAttention_KIVI(nn.Module):
@@ -178,13 +186,28 @@ class LlamaAttention_KIVI(nn.Module):
         self.max_position_embeddings = config.max_position_embeddings
         self.rope_theta = config.rope_theta
         self.is_causal = True
-        self.k_bits, self.v_bits = _resolve_layer_kv_bits(config, layer_idx)
+        self.k_bits, self.v_bits, self.family = _resolve_layer_kv_bits(config, layer_idx)
         assert self.k_bits in (2, 4, 16), f"Unsupported k_bits={self.k_bits}; allowed values are 2, 4, 16"
         assert self.v_bits in (2, 4, 16), f"Unsupported v_bits={self.v_bits}; allowed values are 2, 4, 16"
         # quantize_key/quantize_value False means that side keeps a full-precision
         # (unpacked) cache and never calls the quant/pack or cuda_bmm_fA_qB_outer paths.
         self.quantize_key = self.k_bits < 16
         self.quantize_value = self.v_bits < 16
+        # Stage I1B: "rotation_kivi" rotates Q/K (Key-cache path only, never
+        # Value) with a fixed post-RoPE per-head Hadamard transform before
+        # quantization/caching. self.rotate_kv gates this at forward() time;
+        # for family="kivi" it is False and the forward() path is
+        # byte-for-byte unchanged (see tests/test_rotation_kivi.py's
+        # standard-KIVI regression tests). Failing closed here (at
+        # construction, before any forward pass) rather than at first use
+        # avoids wasting a full model load on a head_dim the Hadamard
+        # construction cannot support.
+        self.rotate_kv = self.family == "rotation_kivi"
+        if self.rotate_kv and not is_power_of_two(self.head_dim):
+            raise HadamardError(
+                f"layer {layer_idx}: family='rotation_kivi' requires head_dim to be a power of two "
+                f"for the Sylvester Hadamard construction, got head_dim={self.head_dim}"
+            )
         self.group_size = config.group_size
         self.residual_length = config.residual_length
         self.key_quant_chunk_size = getattr(config, "key_quant_chunk_size", 8192)
@@ -218,6 +241,18 @@ class LlamaAttention_KIVI(nn.Module):
         use_cache: bool = False,
         **kwargs,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+        if self.rotate_kv:
+            # Stage I1B dispatch-safety guard: this eager path has no
+            # rotation logic (only LlamaFlashAttention_KIVI.forward() does),
+            # so a rotation_kivi layer must fail closed here -- BEFORE any
+            # projection/RoPE/cache/quantization/attention computation --
+            # rather than silently executing standard KIVI behavior for a
+            # policy that claims to be rotated. Never falls back to
+            # family="kivi"; never mutates self.family/self.rotate_kv.
+            raise NotImplementedError(
+                'family="rotation_kivi" is not supported by the eager LlamaAttention_KIVI.forward() path; '
+                "use LlamaFlashAttention_KIVI."
+            )
         if "padding_mask" in kwargs:
             warnings.warn(
                 "Passing `padding_mask` is deprecated and will be removed in v4.37. Please make sure use `attention_mask` instead.`"
@@ -490,6 +525,16 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
         # assert self.num_key_value_groups == 1
         # [bsz, nh, t, hd]
         if past_key_value is not None:
+            if self.rotate_kv:
+                # Stage I1B decode semantics: the live query and this
+                # step's newly-computed key must enter the SAME rotated
+                # representation as everything already cached (which was
+                # itself rotated at prefill time or at an earlier decode
+                # step, below and in the prefill branch) -- never a mix of
+                # raw and rotated Key material. Value is untouched.
+                H = get_normalized_hadamard(self.head_dim, query_states.device, query_states.dtype)
+                query_states = apply_hadamard_rotation(query_states, H)
+                key_states = apply_hadamard_rotation(key_states, H)
             key_states_quant_trans = past_key_value[0]
             key_states_full = past_key_value[1]
             key_scale_trans = past_key_value[2]
@@ -596,10 +641,20 @@ class LlamaFlashAttention_KIVI(LlamaAttention_KIVI):
                 key_states = key_states.to(target_dtype)
                 value_states = value_states.to(target_dtype)
             attn_output = self._flash_attention_forward(
-                query_states.transpose(1, 2), key_states.transpose(1, 2), 
+                query_states.transpose(1, 2), key_states.transpose(1, 2),
                 value_states.transpose(1, 2), None, q_len, dropout=0.0
             )
             del query_states
+            if self.rotate_kv:
+                # Stage I1B prefill semantics: the ORIGINAL (unrotated)
+                # post-RoPE key_states has already been fully consumed by
+                # _flash_attention_forward above -- prefill's real attention
+                # output is therefore identical to standard KIVI/FP16
+                # (query_states is never rotated here; it is already
+                # deleted). This rotation exists ONLY for what gets written
+                # into the KIVI cache from this point on.
+                H = get_normalized_hadamard(self.head_dim, key_states.device, key_states.dtype)
+                key_states = apply_hadamard_rotation(key_states, H)
             # quantize
             if not self.quantize_key:
                 # 16-bit pass-through: keep the whole prefill key cache in full

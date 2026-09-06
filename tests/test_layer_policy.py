@@ -161,9 +161,11 @@ class TestMalformedJSON(unittest.TestCase):
 
 class TestUnsupportedFamily(unittest.TestCase):
     def test_unsupported_default_family_rejected(self):
+        # "polar" remains a schema placeholder only (Stage I1B added
+        # "rotation_kivi" as executable; "polar" is still explicitly not).
         policy_obj = {
             "policy_name": "x",
-            "default": {"k_bits": 16, "v_bits": 16, "family": "rotation_kivi"},
+            "default": {"k_bits": 16, "v_bits": 16, "family": "polar"},
             "overrides": {},
         }
         with self.assertRaises(LayerPolicyError):

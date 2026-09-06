@@ -3,12 +3,14 @@
 Deliberately has no torch/transformers import (mirrors utils/jsonl_integrity.py)
 so it can be parsed/validated/tested without pulling in the model stack.
 
-Scope (Stage A of the layer-wise KV sensitivity project): only bit-width
-allocation for the existing KIVI kernels. "family" is kept in the schema for
-future extensibility (Rotation-KIVI, Polar) but only "kivi" is executable
-right now; a bit width of 16 under family "kivi" means the existing
-FP16/pass-through route (see quantize_key/quantize_value in
-models/llama_kivi.py) -- it is not a distinct quantizer.
+Scope: bit-width allocation for the existing KIVI kernels ("kivi", Stage A),
+plus the Stage I1B "rotation_kivi" family (QuaRot-inspired post-RoPE
+per-head Hadamard Q/K rotation applied to Key-cache quantization only --
+Value stays standard KIVI; see models/llama_kivi.py). "family" is kept
+generic in the schema for further extensibility (e.g. Polar) but only
+"kivi"/"rotation_kivi" are executable; a bit width of 16 under either family
+means the existing FP16/pass-through route (see quantize_key/quantize_value
+in models/llama_kivi.py) -- it is not a distinct quantizer.
 
 Global fallback semantics (this is the backward-compatibility contract):
     resolve_layer_policy(num_hidden_layers, k, v, policy_obj=None)
@@ -24,10 +26,12 @@ from collections import namedtuple
 # Mirrors pred_long_bench.py's ALLOWED_BITS.
 ALLOWED_BITS = (2, 4, 16)
 
-# Only "kivi" is executable in Stage A. The field is part of the schema now
-# so a future family (e.g. "rotation_kivi", "polar") doesn't require a
-# schema migration -- but nothing else is implemented yet.
-SUPPORTED_FAMILIES = ("kivi",)
+# "kivi" (Stage A) and "rotation_kivi" (Stage I1B: QuaRot-inspired post-RoPE
+# per-head Hadamard Q/K rotation applied to KIVI Key-cache quantization --
+# NOT full QuaRot; Value remains standard KIVI) are executable. The field
+# was kept in the schema ahead of time so adding "rotation_kivi" required no
+# schema migration -- "polar" remains a placeholder only, not executable.
+SUPPORTED_FAMILIES = ("kivi", "rotation_kivi")
 
 # Used both to validate policy_name on load and as the directory-naming
 # component, so it must already be filesystem-safe -- no separate
