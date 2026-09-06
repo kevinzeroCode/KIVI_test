@@ -251,13 +251,18 @@ def build_prompt(tokenizer, model_short_name, json_obj, task=CANARY_TASK):
 def load_canary_model(
     model_name_or_path, cache_dir, k_bits, v_bits, seed,
     layer_idx=CANARY_LAYER, group_size=CANARY_GROUP_SIZE, residual_length=CANARY_RESIDUAL_LENGTH,
+    family="kivi",
 ):
-    """`layer_idx`/`group_size`/`residual_length` default to the exact H2
-    canary constants so every existing H2 call site (which never passes
-    them) is byte-identical to before these parameters were added.
-    Generalized (Stage H3B) so the scientific collector can load any of
-    the 8 primary layers under this exact same, already-validated
-    model-construction path -- never an independent reimplementation."""
+    """`layer_idx`/`group_size`/`residual_length`/`family` default to the
+    exact H2 canary constants (family="kivi") so every existing H2/H3 call
+    site (which never passes them) is byte-identical to before these
+    parameters were added. Generalized (Stage H3B: layer_idx/group_size/
+    residual_length; Stage I1-C: family) so the scientific collector and
+    the Rotation-KIVI canary can load any of the 8 primary layers, under
+    any SUPPORTED_FAMILIES value, through this exact same, already-
+    validated model-construction path -- never an independent
+    reimplementation. All non-target layers are ALWAYS family="kivi"
+    K16/V16, regardless of what the target layer's family/bits are."""
     import torch
     import pred_long_bench as plb
 
@@ -266,7 +271,7 @@ def load_canary_model(
     policy_obj = {
         "policy_name": "h0_attention_decode_canary",
         "default": {"k_bits": 16, "v_bits": 16, "family": "kivi"},
-        "overrides": {str(layer_idx): {"k_bits": k_bits, "v_bits": v_bits, "family": "kivi"}},
+        "overrides": {str(layer_idx): {"k_bits": k_bits, "v_bits": v_bits, "family": family}},
     }
     resolved = resolve_layer_policy(probe_config.num_hidden_layers, 16, 16, policy_obj)
 
@@ -285,15 +290,15 @@ def load_canary_model(
     )
     model.eval()
     attn = model.model.layers[layer_idx].self_attn
-    got = (attn.k_bits, attn.v_bits)
-    if got != (k_bits, v_bits):
-        raise CanaryError(f"layer {layer_idx} policy mismatch: expected {(k_bits, v_bits)}, got {got}")
+    got = (attn.k_bits, attn.v_bits, attn.family)
+    if got != (k_bits, v_bits, family):
+        raise CanaryError(f"layer {layer_idx} policy mismatch: expected {(k_bits, v_bits, family)}, got {got}")
     for i, l in enumerate(model.model.layers):
         if i == layer_idx:
             continue
-        g = (l.self_attn.k_bits, l.self_attn.v_bits)
-        if g != (16, 16):
-            raise CanaryError(f"layer {i} is not K16/V16 control: got {g}")
+        g = (l.self_attn.k_bits, l.self_attn.v_bits, l.self_attn.family)
+        if g != (16, 16, "kivi"):
+            raise CanaryError(f"layer {i} is not K16/V16 family='kivi' control: got {g}")
     return model, tokenizer, model_class_name
 
 
