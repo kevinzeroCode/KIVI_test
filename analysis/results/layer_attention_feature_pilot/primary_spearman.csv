@@ -1,0 +1,9 @@
+tensor_axis,task,raw_rho,gate_rho,n,feature_has_variance,target_has_variance
+key,trec,0.08247860988423225,0.08247860988423225,8,True,True
+key,lcc,-0.11904761904761905,-0.11904761904761905,8,True,True
+key,passage_retrieval_en,0.33432392491786583,0.33432392491786583,8,True,True
+key,2wikimqa,0.14638501094227999,0.14638501094227999,8,True,True
+value,trec,,0.0,8,True,False
+value,lcc,-0.07142857142857144,-0.07142857142857144,8,True,True
+value,passage_retrieval_en,-0.37796447300922725,-0.37796447300922725,8,True,True
+value,2wikimqa,0.2142857142857143,0.2142857142857143,8,True,True

@@ -1,0 +1,9 @@
+tensor_axis,removed_task,negative_count,required_negative_count,median_remaining_gate_rho,pass,is_locked_criterion_c
+key,trec,1,2,0.14638501094227999,False,False
+key,lcc,0,2,0.14638501094227999,False,True
+key,passage_retrieval_en,1,2,0.08247860988423225,False,False
+key,2wikimqa,1,2,0.08247860988423225,False,False
+value,trec,2,2,-0.07142857142857144,True,False
+value,lcc,1,2,0.0,False,True
+value,passage_retrieval_en,1,2,0.0,False,False
+value,2wikimqa,2,2,-0.07142857142857144,True,False

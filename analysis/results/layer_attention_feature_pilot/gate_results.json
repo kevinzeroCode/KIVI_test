@@ -1,0 +1,131 @@
+{
+  "threshold_description": "a preregistered pragmatic magnitude threshold (not a universal Spearman/Cohen large-effect standard)",
+  "threshold_value": 0.5,
+  "key": {
+    "criterion_a": {
+      "raw_rho_by_task": {
+        "trec": 0.08247860988423225,
+        "lcc": -0.11904761904761905,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "gate_rho_by_task": {
+        "trec": 0.08247860988423225,
+        "lcc": -0.11904761904761905,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "negative_count": 1,
+      "required": 3,
+      "pass": false
+    },
+    "criterion_b": {
+      "raw_rho_by_task": {
+        "trec": 0.08247860988423225,
+        "lcc": -0.11904761904761905,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "gate_rho_by_task": {
+        "trec": 0.08247860988423225,
+        "lcc": -0.11904761904761905,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "median_abs_gate_rho": 0.1327163149949495,
+      "threshold": 0.5,
+      "pass": false
+    },
+    "criterion_c": {
+      "remaining_tasks": [
+        "trec",
+        "passage_retrieval_en",
+        "2wikimqa"
+      ],
+      "raw_rho_remaining": {
+        "trec": 0.08247860988423225,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "gate_rho_remaining": {
+        "trec": 0.08247860988423225,
+        "passage_retrieval_en": 0.33432392491786583,
+        "2wikimqa": 0.14638501094227999
+      },
+      "negative_count": 0,
+      "required_negative_count": 2,
+      "median_remaining_gate_rho": 0.14638501094227999,
+      "pass": false
+    },
+    "criterion_d": {
+      "layer0_raw_rho": 0.5,
+      "layer0_gate_rho": 0.5,
+      "pass": false
+    },
+    "axis_go": false
+  },
+  "value": {
+    "criterion_a": {
+      "raw_rho_by_task": {
+        "trec": null,
+        "lcc": -0.07142857142857144,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "gate_rho_by_task": {
+        "trec": 0.0,
+        "lcc": -0.07142857142857144,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "negative_count": 2,
+      "required": 3,
+      "pass": false
+    },
+    "criterion_b": {
+      "raw_rho_by_task": {
+        "trec": null,
+        "lcc": -0.07142857142857144,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "gate_rho_by_task": {
+        "trec": 0.0,
+        "lcc": -0.07142857142857144,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "median_abs_gate_rho": 0.14285714285714288,
+      "threshold": 0.5,
+      "pass": false
+    },
+    "criterion_c": {
+      "remaining_tasks": [
+        "trec",
+        "passage_retrieval_en",
+        "2wikimqa"
+      ],
+      "raw_rho_remaining": {
+        "trec": null,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "gate_rho_remaining": {
+        "trec": 0.0,
+        "passage_retrieval_en": -0.37796447300922725,
+        "2wikimqa": 0.2142857142857143
+      },
+      "negative_count": 1,
+      "required_negative_count": 2,
+      "median_remaining_gate_rho": 0.0,
+      "pass": false
+    },
+    "criterion_d": {
+      "layer0_raw_rho": -1.0,
+      "layer0_gate_rho": -1.0,
+      "pass": true
+    },
+    "axis_go": false
+  },
+  "STAGE_H_ATTENTION_FEATURE": "NO_GO"
+}

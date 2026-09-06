@@ -1,0 +1,7 @@
+tensor_axis,task,layer0_mean_distortion,signed_sensitivity,layer0_raw_rho_n3,criterion_d_pass
+key,lcc,0.07567118776023715,2.64,0.5,False
+key,multifieldqa_en,0.07255004176865434,-0.1072,0.5,False
+key,samsum,0.06608352269806549,0.0646,0.5,False
+value,lcc,0.3218989639104519,-4.17,-1.0,True
+value,multifieldqa_en,0.271763918273907,0.0249,-1.0,True
+value,samsum,0.31029777030208494,-0.068,-1.0,True

@@ -1,0 +1,25 @@
+{
+  "collection_head": "72e24f9241451c7aa799dde9773eb52e8ced88af",
+  "checksums": {
+    "/home/kevin/Documents/KIVI_test/outputs/layer_attention_feature_pilot/primary/stage_h_primary_v1/features.jsonl": {
+      "expected": "b8b575a2a27e888d7e4d54f606edeea4634f105e46a38b90d38e9701914e25f9",
+      "actual": "b8b575a2a27e888d7e4d54f606edeea4634f105e46a38b90d38e9701914e25f9",
+      "match": true
+    },
+    "/home/kevin/Documents/KIVI_test/outputs/layer_attention_feature_pilot/primary/stage_h_primary_v1/manifest.json": {
+      "expected": "185ecfd34b92ed13782ca9254a9c8eb0f45b49dc4f62c0118df423d7b31c282f",
+      "actual": "185ecfd34b92ed13782ca9254a9c8eb0f45b49dc4f62c0118df423d7b31c282f",
+      "match": true
+    },
+    "/home/kevin/Documents/KIVI_test/outputs/layer_attention_feature_pilot/diagnostic/stage_h_diagnostic_v1/features.jsonl": {
+      "expected": "a3ecf98f3ccc3f30b0a13d5fe3beb511593c163a3c00cf41700d78066cb51cf2",
+      "actual": "a3ecf98f3ccc3f30b0a13d5fe3beb511593c163a3c00cf41700d78066cb51cf2",
+      "match": true
+    },
+    "/home/kevin/Documents/KIVI_test/outputs/layer_attention_feature_pilot/diagnostic/stage_h_diagnostic_v1/manifest.json": {
+      "expected": "96f18234ad2e9f30ebbe8d3b52c5f0285765a944ee7ee0c9b0939eb301309617",
+      "actual": "96f18234ad2e9f30ebbe8d3b52c5f0285765a944ee7ee0c9b0939eb301309617",
+      "match": true
+    }
+  }
+}
