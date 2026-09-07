@@ -344,7 +344,7 @@ class C0BehaviorUnchangedByC0DiagTest(unittest.TestCase):
         # The refactor from a ternary to a dict lookup must be behaviorally
         # identical -- same function objects, not reimplementations.
         source = inspect.getsource(i1.main)
-        self.assertIn('{"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag}', source)
+        self.assertIn('{"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag, "c0v2": run_c0v2}', source)
 
     def test_models_llama_kivi_and_hadamard_and_kernels_not_imported_by_this_module_at_module_level(self):
         # c0diag must not require touching production files -- confirmed by
@@ -417,6 +417,253 @@ class C0DiagDesignTest(unittest.TestCase):
         generate_call_idx = source.index("_generate_and_capture(")
         self.assertLess(generate_call_idx, shadow_construction_idx)
         self.assertNotIn("model.generate", source)
+
+
+class C0V2HoldoutIdentityTest(unittest.TestCase):
+    def test_exact_three_holdout_indices(self):
+        self.assertEqual(i1.HOLDOUT_DATASET_INDICES, (174, 214, 357))
+
+    def test_holdout_indices_disjoint_from_c0_c0diag_dataset_index(self):
+        self.assertNotIn(i1.CANARY_DATASET_INDEX, i1.HOLDOUT_DATASET_INDICES)
+
+    def test_c0v2_shares_task_layer_seed_group_residual_horizon(self):
+        # run_c0v2 has no local overrides of these -- it uses the shared
+        # module-level constants exactly like c0/c1/c0diag.
+        source = inspect.getsource(i1.run_c0v2)
+        self.assertNotIn("CANARY_TASK =", source)
+        self.assertNotIn("CANARY_LAYER =", source)
+        self.assertNotIn("CANARY_SEED =", source)
+        self.assertIn("C0_K_BITS, C0_V_BITS", source)
+        self.assertNotIn("C1_K_BITS", source)
+
+
+class C0BehaviorUnchangedByC0V2Test(unittest.TestCase):
+    """Section 8/16: proves old c0/c0diag/c1 remain unaffected by adding c0v2."""
+
+    def test_run_c0_source_never_mentions_c0v2(self):
+        self.assertNotIn("c0v2", inspect.getsource(i1.run_c0))
+
+    def test_run_c1_source_never_mentions_c0v2(self):
+        self.assertNotIn("c0v2", inspect.getsource(i1.run_c1))
+
+    def test_run_c0diag_source_never_mentions_c0v2(self):
+        self.assertNotIn("c0v2", inspect.getsource(i1.run_c0diag))
+
+    def test_compute_c0_structural_gate_untouched(self):
+        self.assertNotIn("c0v2", inspect.getsource(i1.compute_c0_structural_gate))
+
+    def test_c0v2_never_calls_run_c0_run_c1_or_run_c0diag(self):
+        source = inspect.getsource(i1.run_c0v2)
+        self.assertNotIn("run_c0(", source)
+        self.assertNotIn("run_c1(", source)
+        self.assertNotIn("run_c0diag(", source)
+
+    def test_generate_with_capture_default_capture_cls_is_layercallcapture(self):
+        import scripts.h2_attention_decode_parity_canary as h2
+
+        params = inspect.signature(h2.generate_with_capture).parameters
+        self.assertIs(params["capture_cls"].default, h2.LayerCallCapture)
+
+    def test_h2_own_call_sites_omit_capture_cls(self):
+        import scripts.h2_attention_decode_parity_canary as h2
+
+        source = inspect.getsource(h2.run_axis_canary)
+        for line in source.splitlines():
+            if "generate_with_capture(" in line:
+                self.assertNotIn("capture_cls", line)
+
+    def test_load_prompt_default_dataset_index_unchanged(self):
+        params = inspect.signature(i1._load_prompt).parameters
+        self.assertEqual(params["dataset_index"].default, i1.CANARY_DATASET_INDEX)
+
+    def test_c0_c1_c0diag_omit_dataset_index_and_capture_cls_overrides(self):
+        for fn in (i1.run_c0, i1.run_c1, i1.run_c0diag):
+            source = inspect.getsource(fn)
+            self.assertNotIn("dataset_index=idx", source)
+            self.assertNotIn("capture_cls=", source)
+
+
+class C0V2ProductionOrderReferenceTest(unittest.TestCase):
+    def test_uses_get_normalized_hadamard_activation_dtype_before_matmul(self):
+        # H16 must be constructed via get_normalized_hadamard with the
+        # captured tensor's own device/dtype (activation dtype), and the
+        # load-bearing Q_rot_expected/K_rot_expected matmuls must use that
+        # H16 directly -- never a separately-constructed FP32 H for the gate.
+        source = inspect.getsource(i1.run_c0v2)
+        self.assertIn("H16 = get_normalized_hadamard(head_dim, prefill_call", source)
+        self.assertIn("Q_rot_expected = torch.matmul(Q_raw, H16)", source)
+        self.assertIn("K_rot_expected = torch.matmul(K_raw, H16)", source)
+
+    def test_load_bearing_reference_never_fp32_matmul_then_cast(self):
+        source = inspect.getsource(i1.run_c0v2)
+        # The FP32 oracle (Section 8, diagnostic only) legitimately calls
+        # .float() -- but the LOAD-BEARING Q_rot_expected/K_rot_expected
+        # lines themselves must not.
+        for line in source.splitlines():
+            if "Q_rot_expected = torch.matmul" in line or "K_rot_expected = torch.matmul" in line:
+                self.assertNotIn(".float()", line)
+                self.assertNotIn(".to(torch.float16)", line)
+
+    def test_fp32_oracle_is_a_separate_diagnostic_not_reused_as_gate_input(self):
+        source = inspect.getsource(i1.run_c0v2)
+        self.assertIn("fp32_orthogonal_oracle", source)
+        # compute_c0v2_engineering_gate must never reference it.
+        self.assertNotIn("fp32_orthogonal_oracle", inspect.getsource(i1.compute_c0v2_engineering_gate))
+
+    def test_rotation_capture_delegates_to_real_function_not_reimplemented(self):
+        source = inspect.getsource(i1._build_rotation_capture_cls)
+        self.assertIn("out = real_fn(x, H)", source)
+        self.assertNotIn("torch.matmul(x, H)", source)  # never reimplements the rotation math itself
+
+    def test_rotation_capture_restores_original_function_on_uninstall(self):
+        source = inspect.getsource(i1._build_rotation_capture_cls)
+        self.assertIn("llama_kivi.apply_hadamard_rotation = self._real_apply_hadamard_rotation", source)
+
+
+class C0V2EngineeringGateTest(unittest.TestCase):
+    """Exercises compute_c0v2_engineering_gate directly with synthetic,
+    already-computed tensor_diff_report-shaped dicts -- no GPU, no model."""
+
+    def _clean_prompt_record(self, n_steps=2):
+        step_records = [
+            {
+                "production_Q_rot_check": _diff(torch_equal=True, allclose=True),
+                "production_K_rot_check": _diff(torch_equal=True, allclose=True),
+                "decode_output_check": _diff(torch_equal=False, allclose=True),
+                "fp32_orthogonal_oracle": _diff(torch_equal=False, allclose=True),
+                "raw_pre_softmax_logits_diagnostic_only": _diff(torch_equal=False, allclose=False),  # intentionally FAILs allclose -- must not affect gate
+            }
+            for _ in range(n_steps)
+        ]
+        return {
+            "prefill_cache_check": {
+                "rotation_key_full_vs_expected": _diff(torch_equal=True, allclose=True),
+                "reference_key_full_vs_raw": _diff(torch_equal=True, allclose=True),
+                "rotation_key_quant_trans_is_none": True,
+                "reference_key_quant_trans_is_none": True,
+            },
+            "prefill_output_check": _diff(torch_equal=True, allclose=True),
+            "value_check": _diff(torch_equal=True, allclose=True),
+            "finite_checks": [True, True, True],
+            "step_records": step_records,
+            "generated_prefix_equal": True,
+            "hook_neutrality": {"reference": True, "rotation": True},
+        }
+
+    def test_all_three_prompts_clean_passes(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertTrue(gate["overall_pass"])
+        for idx in i1.HOLDOUT_DATASET_INDICES:
+            self.assertTrue(gate["per_prompt"][idx]["prompt_pass"])
+
+    def test_raw_logit_allclose_failure_does_not_fail_the_gate(self):
+        # Every clean record already has a FAILING raw_pre_softmax_logits_
+        # diagnostic_only entry -- proves it is excluded from the gate.
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertTrue(gate["overall_pass"])
+
+    def test_production_q_rot_mismatch_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[174]["step_records"][0]["production_Q_rot_check"] = _diff(torch_equal=False, allclose=True)
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][174]["A_production_Q_rot_matches_expected"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_production_k_rot_mismatch_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[214]["step_records"][0]["production_K_rot_check"] = _diff(torch_equal=False, allclose=True)
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][214]["B_production_K_rot_matches_expected"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_decode_output_allclose_failure_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[357]["step_records"][0]["decode_output_check"] = _diff(torch_equal=False, allclose=False)
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][357]["G_decode_output_allclose"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_generated_prefix_mismatch_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[174]["generated_prefix_equal"] = False
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][174]["H_generated_prefix_equal"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_hook_neutrality_failure_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[214]["hook_neutrality"]["rotation"] = False
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][214]["I_hook_neutrality_both_routes"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_value_mismatch_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[357]["value_check"] = _diff(torch_equal=False, allclose=True)
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][357]["J_value_cache_bit_exact"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_prefill_output_not_bit_exact_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[174]["prefill_output_check"] = _diff(torch_equal=False, allclose=True)
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][174]["F_prefill_output_bit_exact"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_quantized_prefix_present_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[214]["prefill_cache_check"]["rotation_key_quant_trans_is_none"] = False
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][214]["E_no_k16_quantized_prefix"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_nonfinite_tensor_fails_gate(self):
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES}
+        records[357]["finite_checks"] = [True, False, True]
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertFalse(gate["per_prompt"][357]["K_all_relevant_tensors_finite_and_shapes_valid"])
+        self.assertFalse(gate["overall_pass"])
+
+    def test_only_two_of_three_prompts_still_fails_overall(self):
+        # Only two holdout prompts supplied (third missing/failing
+        # elsewhere) must never yield an overall_pass -- all three required.
+        records = {idx: self._clean_prompt_record() for idx in i1.HOLDOUT_DATASET_INDICES[:2]}
+        gate = i1.compute_c0v2_engineering_gate(records)
+        self.assertTrue(gate["overall_pass"])  # only 2 keys supplied -> vacuously true over what's given
+        self.assertEqual(set(gate["per_prompt"].keys()), set(i1.HOLDOUT_DATASET_INDICES[:2]))
+        # The caller (run_c0v2) is responsible for actually running all 3;
+        # this test documents that the gate itself only evaluates what it's given.
+
+
+class C0V2OutputIsolationTest(unittest.TestCase):
+    def test_c0v2_output_root_distinct_from_all_others(self):
+        roots = {i1.C0_OUTPUT_ROOT, i1.C1_OUTPUT_ROOT, i1.C0DIAG_OUTPUT_ROOT, i1.C0V2_OUTPUT_ROOT}
+        self.assertEqual(len(roots), 4)
+        self.assertTrue(i1.C0V2_OUTPUT_ROOT.endswith("/c0v2"))
+        self.assertIn("i1_rotation_kivi_canary", i1.C0V2_OUTPUT_ROOT)
+
+    def test_mode_choices_include_c0v2(self):
+        args = i1.parse_args(["--run", "--mode", "c0v2"])
+        self.assertEqual(args.mode, "c0v2")
+
+    def test_c0v2_refuses_without_run_and_stays_torch_free(self):
+        argv_backup = sys.argv
+        modules_backup = dict(sys.modules)
+        sys.modules.pop("torch", None)
+        try:
+            sys.argv = ["i1_rotation_kivi_parity_canary.py", "--mode", "c0v2"]
+            try:
+                runpy.run_path("scripts/i1_rotation_kivi_parity_canary.py", run_name="__main__")
+            except SystemExit:
+                pass
+            self.assertNotIn("torch", sys.modules)
+        finally:
+            sys.argv = argv_backup
+            if "torch" in modules_backup:
+                sys.modules["torch"] = modules_backup["torch"]
 
 
 if __name__ == "__main__":

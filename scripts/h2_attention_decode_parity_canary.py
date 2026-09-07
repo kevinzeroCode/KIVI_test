@@ -302,19 +302,24 @@ def load_canary_model(
     return model, tokenizer, model_class_name
 
 
-def generate_with_capture(model, tokenizer, prompt, max_new_tokens, capture=True, layer_idx=CANARY_LAYER, extra_generate_kwargs=None):
-    """`layer_idx`/`extra_generate_kwargs` default to CANARY_LAYER/None so
-    every existing H2 call site (which never passes them) issues the exact
-    same model.generate() call as before these parameters were added.
-    Generalized (Stage H3B) so the scientific collector can target any
-    layer and pass task-specific generation kwargs (e.g. samsum's
-    min_length/eos_token_id, via utils.generation_semantics) through this
-    same fresh-hook-state-per-call path, rather than reimplementing it."""
+def generate_with_capture(model, tokenizer, prompt, max_new_tokens, capture=True, layer_idx=CANARY_LAYER, extra_generate_kwargs=None, capture_cls=LayerCallCapture):
+    """`layer_idx`/`extra_generate_kwargs`/`capture_cls` default to
+    CANARY_LAYER/None/LayerCallCapture so every existing H2 call site
+    (which never passes them) issues the exact same model.generate() call,
+    using the exact same capture class, as before these parameters were
+    added. Generalized (Stage H3B: layer_idx/extra_generate_kwargs; Stage
+    I1-C0V2: capture_cls) so the scientific collector can target any layer
+    and pass task-specific generation kwargs (e.g. samsum's min_length/
+    eos_token_id, via utils.generation_semantics), and so a narrowly-scoped
+    LayerCallCapture SUBCLASS (never a reimplementation) can additionally
+    observe production-internal calls (e.g. apply_hadamard_rotation) --
+    through this same fresh-hook-state-per-call path, rather than
+    reimplementing any of it."""
     import torch
 
     extra_generate_kwargs = extra_generate_kwargs or {}
     attn = model.model.layers[layer_idx].self_attn
-    layer_capture = LayerCallCapture(attn, attn.head_dim, attn.num_key_value_heads) if capture else None
+    layer_capture = capture_cls(attn, attn.head_dim, attn.num_key_value_heads) if capture else None
     if capture:
         layer_capture.install_handles()
 

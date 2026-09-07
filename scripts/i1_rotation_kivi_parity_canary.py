@@ -21,11 +21,23 @@ Two modes:
              ordinary FP16 representation rounding or a genuine production
              mismatch. One rotation_kivi K16/V16 model load only; defines
              no new pass/fail gate, reports raw numbers.
+  --mode c0v2  Stage I1-C0V2 prospective production-order engineering-
+             validation canary (read-only relative to c0/c1/c0diag's own
+             code): does the real production path execute the exact
+             frozen production-order FP16 Hadamard representation
+             (H cast to activation dtype, THEN matmul -- never FP32-
+             matmul-then-cast) while downstream K16/V16 behavior holds up
+             to expected finite-precision effects, across three holdout
+             lcc prompts NOT used to diagnose the original C0/C0D. Raw
+             pre-softmax-logit allclose is explicitly excluded from this
+             gate (descriptive only). Does NOT reinterpret, overwrite, or
+             even read the historical C0 result -- ORIGINAL_I1_C0_RESULT =
+             FAIL remains true regardless of this mode's outcome.
 
 All modes require an explicit --run flag; omitting it (or any git-dirty /
 conflicting-process / GPU-busy condition) refuses before any GPU work.
-Writes only under outputs/i1_rotation_kivi_canary/{c0,c1,c0diag}/ -- never
-outputs/layer_attention_feature_pilot/ or outputs/layer_sensitivity_pilot/
+Writes only under outputs/i1_rotation_kivi_canary/{c0,c1,c0diag,c0v2}/ --
+never outputs/layer_attention_feature_pilot/ or outputs/layer_sensitivity_pilot/
 (frozen/reserved Stage-H/Stage-E data), and never overwrites a prior run
 (each run gets its own UTC-timestamped subdirectory).
 
@@ -66,6 +78,9 @@ C1_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c1")
 # Stage I1-C0D: numerical attribution diagnostic. Separate root -- never
 # overwrites a historical C0 run.
 C0DIAG_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c0diag")
+# Stage I1-C0V2: prospective production-order engineering-validation
+# canary. Separate root -- never overwrites c0/, c0diag/, or c1/.
+C0V2_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c0v2")
 
 DEFAULT_MODEL_NAME = "lmsys/longchat-7b-v1.5-32k"
 DEFAULT_CACHE_DIR = "./cached_models"
@@ -84,6 +99,14 @@ C0_K_BITS, C0_V_BITS = 16, 16
 C1_K_BITS, C1_V_BITS = 2, 16
 
 REQUESTED_INVARIANCE_STEPS = (1, 2, 4)
+
+# Stage I1-C0V2 (Section 3): three previously-locked lcc dataset indices
+# NOT used to diagnose C0/C0D (which used only dataset_index=122). These
+# are exactly the remaining 3 of the 4 preregistered lcc calibration
+# samples (see scripts/run_layer_attention_feature_pilot.py's
+# LOCKED_SAMPLE_SELECTION["lcc"] = (122, 174, 214, 357)) -- never
+# reselected or chosen by task performance.
+HOLDOUT_DATASET_INDICES = (174, 214, 357)
 
 CONFLICTING_PROCESS_PATTERNS = [
     "h2_attention_decode_parity_canary.py",
@@ -288,27 +311,37 @@ def _release_model(model):
         pass
 
 
-def _load_prompt(tokenizer, model_name_or_path):
+def _load_prompt(tokenizer, model_name_or_path, dataset_index=CANARY_DATASET_INDEX):
+    """`dataset_index` defaults to CANARY_DATASET_INDEX so every existing
+    C0/C1/C0diag call site (which never passes it) loads the exact same
+    prompt as before this parameter was added. Generalized (Stage
+    I1-C0V2) so the holdout-prompt gate can load any of the locked lcc
+    dataset indices without a second, duplicated prompt-loading path."""
     from datasets import load_dataset
 
     from scripts.h2_attention_decode_parity_canary import build_prompt
 
     data = load_dataset("THUDM/LongBench", CANARY_TASK, split="test", trust_remote_code=True)
-    json_obj = data[CANARY_DATASET_INDEX]
+    json_obj = data[dataset_index]
     model_short_name = model_name_or_path.split("/")[-1]
     return build_prompt(tokenizer, model_short_name, json_obj, task=CANARY_TASK)
 
 
-def _generate_and_capture(model, tokenizer, prompt):
+def _generate_and_capture(model, tokenizer, prompt, capture_cls=None):
     """One fully-instrumented generation: hooks-on run + hooks-off
-    hook-neutrality companion run, plus reshaped V attached to every call."""
-    from scripts.h2_attention_decode_parity_canary import generate_with_capture
+    hook-neutrality companion run, plus reshaped V attached to every call.
+    `capture_cls` defaults to None (-> generate_with_capture's own default,
+    LayerCallCapture) so every existing C0/C1/C0diag call site is
+    unaffected; Stage I1-C0V2 passes RotationCaptureLayerCallCapture to
+    additionally observe the real production apply_hadamard_rotation calls."""
+    from scripts.h2_attention_decode_parity_canary import LayerCallCapture, generate_with_capture
 
+    capture_cls = capture_cls or LayerCallCapture
     ids_with_hooks, capture, prompt_len = generate_with_capture(
-        model, tokenizer, prompt, CANARY_MAX_NEW_TOKENS, capture=True, layer_idx=CANARY_LAYER
+        model, tokenizer, prompt, CANARY_MAX_NEW_TOKENS, capture=True, layer_idx=CANARY_LAYER, capture_cls=capture_cls
     )
     ids_without_hooks, _, _ = generate_with_capture(
-        model, tokenizer, prompt, CANARY_MAX_NEW_TOKENS, capture=False, layer_idx=CANARY_LAYER
+        model, tokenizer, prompt, CANARY_MAX_NEW_TOKENS, capture=False, layer_idx=CANARY_LAYER, capture_cls=capture_cls
     )
     hook_neutral = ids_with_hooks == ids_without_hooks
 
@@ -729,12 +762,271 @@ def run_c0diag(model_name_or_path=DEFAULT_MODEL_NAME, cache_dir=DEFAULT_CACHE_DI
 
 
 # ---------------------------------------------------------------------------
+# C0-V2: prospective production-order engineering-validation canary
+# (Stage I1-C0V2). ORIGINAL_I1_C0_RESULT = FAIL remains historically true
+# and is never reinterpreted by this code -- this is a SEPARATE criterion
+# (Section 2/14): does the real production path execute the exact frozen
+# production-order FP16 Hadamard representation, and does downstream K16/
+# V16 behavior hold up to expected finite-precision effects. Raw pre-
+# softmax-logit allclose_1e-3 (the old C0 gate) is explicitly excluded
+# from this gate -- descriptive only (Section 10/13).
+# ---------------------------------------------------------------------------
+
+def _build_rotation_capture_cls():
+    """Lazily builds RotationCaptureLayerCallCapture, a subclass of H2's
+    LayerCallCapture (imported here, never modified, reused via
+    inheritance) that adds a scoped spy on the REAL production
+    models.llama_kivi.apply_hadamard_rotation: observes each actual call's
+    input/output and then delegates to the unmodified original function --
+    never reimplements rotation. Built lazily (not a module-level class)
+    specifically so importing this script never transitively imports
+    torch -- LayerCallCapture only becomes resolvable once this factory
+    is actually called, deep inside run_c0v2's own deferred-import scope.
+    Installed/removed via the exact same pre-hook/post-hook scoping as
+    every other spy in this project (active only around the target
+    layer's own forward() call). Records every call made during that
+    forward() in order: prefill has exactly one (Key only); cached decode
+    has exactly two (Query first, then Key -- matching models/llama_kivi.py's
+    real call order).
+    """
+    from scripts.h2_attention_decode_parity_canary import LayerCallCapture
+
+    class RotationCaptureLayerCallCapture(LayerCallCapture):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._real_apply_hadamard_rotation = None
+
+        def _install(self, module, args, kwargs):
+            super()._install(module, args, kwargs)
+            import models.llama_kivi as llama_kivi
+
+            self._real_apply_hadamard_rotation = llama_kivi.apply_hadamard_rotation
+            current = self._current
+            real_fn = self._real_apply_hadamard_rotation
+
+            def spy_apply_hadamard_rotation(x, H):
+                out = real_fn(x, H)
+                current.setdefault("rotation_calls", []).append({"input": x.detach().clone(), "output": out.detach().clone()})
+                return out
+
+            llama_kivi.apply_hadamard_rotation = spy_apply_hadamard_rotation
+
+        def _uninstall(self, module, args, kwargs, output):
+            import models.llama_kivi as llama_kivi
+
+            llama_kivi.apply_hadamard_rotation = self._real_apply_hadamard_rotation
+            super()._uninstall(module, args, kwargs, output)
+
+    return RotationCaptureLayerCallCapture
+
+
+def compute_c0v2_engineering_gate(prompt_records):
+    """Pure combination of the Stage I1-C0V2 criteria A-K (Section 13),
+    evaluated across ALL holdout prompts -- passes only if EVERY holdout
+    prompt satisfies EVERY criterion. Raw pre-softmax-logit allclose is
+    explicitly EXCLUDED. Defined before any GPU run; no criterion may be
+    added or removed after observing results.
+    """
+    per_prompt = {}
+    for idx, rec in prompt_records.items():
+        pcc = rec["prefill_cache_check"]
+        step_records = rec["step_records"]
+        criteria = {
+            "A_production_Q_rot_matches_expected": all(s["production_Q_rot_check"]["torch_equal"] for s in step_records),
+            "B_production_K_rot_matches_expected": all(s["production_K_rot_check"]["torch_equal"] for s in step_records),
+            "C_rotated_prefill_cache_matches_expected": bool(pcc["rotation_key_full_vs_expected"]["torch_equal"]),
+            "D_reference_prefill_cache_matches_raw": bool(pcc["reference_key_full_vs_raw"]["torch_equal"]),
+            "E_no_k16_quantized_prefix": bool(pcc["rotation_key_quant_trans_is_none"] and pcc["reference_key_quant_trans_is_none"]),
+            "F_prefill_output_bit_exact": bool(rec["prefill_output_check"]["torch_equal"]),
+            "G_decode_output_allclose": all(s["decode_output_check"]["allclose_1e-3"] for s in step_records),
+            "H_generated_prefix_equal": bool(rec["generated_prefix_equal"]),
+            "I_hook_neutrality_both_routes": bool(rec["hook_neutrality"]["reference"] and rec["hook_neutrality"]["rotation"]),
+            "J_value_cache_bit_exact": bool(rec["value_check"]["torch_equal"]),
+            "K_all_relevant_tensors_finite_and_shapes_valid": bool(
+                all(rec["finite_checks"])
+                and all(s["production_Q_rot_check"]["shape_equal"] and s["production_K_rot_check"]["shape_equal"] and s["decode_output_check"]["shape_equal"] for s in step_records)
+                and pcc["rotation_key_full_vs_expected"]["shape_equal"]
+                and pcc["reference_key_full_vs_raw"]["shape_equal"]
+            ),
+        }
+        criteria["prompt_pass"] = all(criteria.values())
+        per_prompt[idx] = criteria
+    overall_pass = all(v["prompt_pass"] for v in per_prompt.values())
+    return {"per_prompt": per_prompt, "overall_pass": overall_pass}
+
+
+def run_c0v2(model_name_or_path=DEFAULT_MODEL_NAME, cache_dir=DEFAULT_CACHE_DIR):
+    """Runs the three locked HOLDOUT_DATASET_INDICES prompts against both
+    routes (one fresh REFERENCE load + one fresh ROTATION load, each
+    reused sequentially across all 3 prompts -- never 6 separate loads,
+    never both models resident simultaneously), and evaluates the
+    prospective compute_c0v2_engineering_gate. Does NOT alter
+    ORIGINAL_I1_C0_RESULT, which is not read, computed, or referenced by
+    this function at all -- it is a fact about a different, already-frozen
+    artifact.
+    """
+    import torch
+
+    from scripts.h2_attention_decode_parity_canary import tensor_diff_report
+    from utils.attention_decode_features import parse_kivi_cache_tuple
+    from utils.hadamard import get_normalized_hadamard, normalized_hadamard_matrix
+
+    def _finite(t):
+        return bool(torch.isfinite(t.float()).all().item()) if t is not None else False
+
+    # --- REFERENCE: one fresh load, all 3 holdout prompts ---
+    ref_model, ref_tokenizer, ref_model_class = _fresh_model_load(model_name_or_path, cache_dir, C0_K_BITS, C0_V_BITS, "kivi")
+    ref_by_prompt = {}
+    for idx in HOLDOUT_DATASET_INDICES:
+        prompt = _load_prompt(ref_tokenizer, model_name_or_path, dataset_index=idx)
+        ref_by_prompt[idx] = _generate_and_capture(ref_model, ref_tokenizer, prompt)
+    _release_model(ref_model)
+
+    # --- ROTATION: one fresh load, all 3 holdout prompts, WITH rotation capture ---
+    rot_model, rot_tokenizer, rot_model_class = _fresh_model_load(model_name_or_path, cache_dir, C0_K_BITS, C0_V_BITS, "rotation_kivi")
+    rot_by_prompt = {}
+    for idx in HOLDOUT_DATASET_INDICES:
+        prompt = _load_prompt(rot_tokenizer, model_name_or_path, dataset_index=idx)
+        rot_by_prompt[idx] = _generate_and_capture(rot_model, rot_tokenizer, prompt, capture_cls=_build_rotation_capture_cls())
+    _release_model(rot_model)
+
+    prompt_records = {}
+    for idx in HOLDOUT_DATASET_INDICES:
+        ref = ref_by_prompt[idx]
+        rot = rot_by_prompt[idx]
+        ref_calls, rot_calls = ref["calls"], rot["calls"]
+        if len(ref_calls) < 3 or len(rot_calls) < 3:
+            raise RuntimeError(f"dataset_index {idx}: expected >=3 layer-0 calls per route, got reference={len(ref_calls)} rotation={len(rot_calls)}")
+
+        head_dim = rot["head_dim"]
+        prefill_call = rot_calls[0]
+
+        # Section 5: H cast/materialized in activation dtype THEN matmul --
+        # exactly get_normalized_hadamard's own convention (reused, not
+        # reimplemented). Never FP32-matmul-then-cast for this gate.
+        H16 = get_normalized_hadamard(head_dim, prefill_call["k_post_rope"].device, prefill_call["k_post_rope"].dtype)
+        H32 = normalized_hadamard_matrix(head_dim, dtype=torch.float32).to(prefill_call["k_post_rope"].device)
+
+        # --- Section 7: prefill cache check ---
+        K_rot_expected_prefill = torch.matmul(prefill_call["k_post_rope"], H16)
+        rot_past = parse_kivi_cache_tuple(rot_calls[1]["past_key_value_in"])
+        ref_past = parse_kivi_cache_tuple(ref_calls[1]["past_key_value_in"])
+        prefill_cache_check = {
+            "rotation_key_full_vs_expected": tensor_diff_report(rot_past.key_full, K_rot_expected_prefill, f"idx{idx}_rotation_key_full_vs_expected"),
+            "reference_key_full_vs_raw": tensor_diff_report(ref_past.key_full, ref_calls[0]["k_post_rope"], f"idx{idx}_reference_key_full_vs_raw"),
+            "rotation_key_quant_trans_is_none": rot_past.key_quant_trans is None,
+            "reference_key_quant_trans_is_none": ref_past.key_quant_trans is None,
+        }
+
+        # --- Section 9: prefill output (bit-exact required) ---
+        prefill_output_check = tensor_diff_report(rot_calls[0]["attn_output_pre_o_proj"], ref_calls[0]["attn_output_pre_o_proj"], f"idx{idx}_prefill_attn_output")
+
+        # --- Section 12: Value representation (diagnostic-only claim) ---
+        value_check = tensor_diff_report(rot_past.value_full, ref_past.value_full, f"idx{idx}_value_full")
+
+        finite_checks = [
+            _finite(K_rot_expected_prefill), _finite(rot_past.key_full), _finite(ref_past.key_full),
+            _finite(rot_calls[0]["attn_output_pre_o_proj"]), _finite(ref_calls[0]["attn_output_pre_o_proj"]),
+        ]
+
+        # --- Sections 4/5/6/8/10: per-decode-step checks ---
+        rot_decode_calls = rot_calls[1:]
+        ref_decode_calls = ref_calls[1:]
+        n_common = min(len(rot_decode_calls), len(ref_decode_calls))
+
+        step_records = []
+        for step_idx in range(1, n_common + 1):
+            rcall = rot_decode_calls[step_idx - 1]
+            fcall = ref_decode_calls[step_idx - 1]
+
+            rotation_calls = rcall.get("rotation_calls") or []
+            if len(rotation_calls) < 2:
+                raise RuntimeError(
+                    f"dataset_index {idx} step {step_idx}: expected 2 apply_hadamard_rotation calls "
+                    f"(Query then Key) in the decode branch, got {len(rotation_calls)}"
+                )
+            production_Q_rot = rotation_calls[0]["output"]
+            production_K_rot = rotation_calls[1]["output"]
+            Q_raw = rotation_calls[0]["input"]
+            K_raw = rotation_calls[1]["input"]
+
+            # --- Section 5/6: independent production-order reference, load-bearing ---
+            Q_rot_expected = torch.matmul(Q_raw, H16)
+            K_rot_expected = torch.matmul(K_raw, H16)
+            production_Q_rot_check = tensor_diff_report(production_Q_rot, Q_rot_expected, f"idx{idx}_step{step_idx}_Q_rot")
+            production_K_rot_check = tensor_diff_report(production_K_rot, K_rot_expected, f"idx{idx}_step{step_idx}_K_rot")
+
+            # --- Section 8: FP32 orthogonal oracle (separate diagnostic, never the gate) ---
+            Qf, Kf = Q_raw.float(), K_raw.float()
+            L_raw32 = torch.matmul(Qf, Kf.transpose(2, 3))
+            L_rot32 = torch.matmul(torch.matmul(Qf, H32), torch.matmul(Kf, H32).transpose(2, 3))
+            fp32_orthogonal_oracle = tensor_diff_report(L_rot32, L_raw32, f"idx{idx}_step{step_idx}_fp32_oracle")
+
+            # --- Section 10: decode output (gate) + raw logits (diagnostic only) ---
+            decode_output_check = tensor_diff_report(rcall.get("attn_output_pre_o_proj"), fcall.get("attn_output_pre_o_proj"), f"idx{idx}_step{step_idx}_decode_output")
+            raw_pre_softmax_logits_diagnostic_only = tensor_diff_report(
+                rcall.get("pre_softmax_logits"), fcall.get("pre_softmax_logits"), f"idx{idx}_step{step_idx}_raw_logits_diagnostic_only"
+            )
+
+            finite_checks.append(_finite(production_Q_rot))
+            finite_checks.append(_finite(production_K_rot))
+            finite_checks.append(_finite(rcall.get("attn_output_pre_o_proj")))
+            finite_checks.append(_finite(fcall.get("attn_output_pre_o_proj")))
+
+            step_records.append(
+                {
+                    "step": step_idx,
+                    "production_Q_rot_check": production_Q_rot_check,
+                    "production_K_rot_check": production_K_rot_check,
+                    "fp32_orthogonal_oracle": fp32_orthogonal_oracle,
+                    "decode_output_check": decode_output_check,
+                    "raw_pre_softmax_logits_diagnostic_only": raw_pre_softmax_logits_diagnostic_only,
+                }
+            )
+
+        # --- Section 11: generated prefix + hook neutrality ---
+        generated_prefix_equal = ref["ids_with_hooks"] == rot["ids_with_hooks"]
+
+        prompt_records[idx] = {
+            "dataset_index": idx,
+            "prefill_cache_check": prefill_cache_check,
+            "prefill_output_check": prefill_output_check,
+            "value_check": value_check,
+            "finite_checks": finite_checks,
+            "step_records": step_records,
+            "generated_ids_reference": ref["ids_with_hooks"],
+            "generated_ids_rotation": rot["ids_with_hooks"],
+            "generated_prefix_equal": generated_prefix_equal,
+            "hook_neutrality": {"reference": ref["hook_neutral"], "rotation": rot["hook_neutral"]},
+        }
+
+    gate = compute_c0v2_engineering_gate(prompt_records)
+
+    return {
+        "mode": "c0v2",
+        "reference_policy": f"K{C0_K_BITS}/V{C0_V_BITS} family=kivi",
+        "rotation_policy": f"K{C0_K_BITS}/V{C0_V_BITS} family=rotation_kivi",
+        "reference_model_class": ref_model_class,
+        "rotation_model_class": rot_model_class,
+        "holdout_dataset_indices": list(HOLDOUT_DATASET_INDICES),
+        "prompt_records": prompt_records,
+        "c0_v2_engineering_gate": gate,
+        "historical_note": (
+            "ORIGINAL_I1_C0_RESULT = FAIL (unchanged, frozen at "
+            "outputs/i1_rotation_kivi_canary/c0/20260907T054459769185Z/). "
+            "This c0v2 result is a SEPARATE prospective engineering-validation "
+            "criterion (Stage I1-C0V2), not a reinterpretation of the historical C0 result."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--mode", choices=["c0", "c1", "c0diag"], required=False, default=None)
+    p.add_argument("--mode", choices=["c0", "c1", "c0diag", "c0v2"], required=False, default=None)
     p.add_argument("--run", action="store_true", help="Real GPU execution. Required for any mode to touch the GPU.")
     p.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME)
     p.add_argument("--cache_dir", default=DEFAULT_CACHE_DIR)
@@ -747,12 +1039,12 @@ def main():
     if not args.run:
         print(
             "Refusing to proceed: --run was not given. Real Stage I1-C GPU canaries "
-            "(--mode c0 / --mode c1 / --mode c0diag) never execute without an explicit --run flag.",
+            "(--mode c0 / --mode c1 / --mode c0diag / --mode c0v2) never execute without an explicit --run flag.",
             file=sys.stderr,
         )
         return 1
     if args.mode is None:
-        print("Refusing to proceed: --mode {c0,c1,c0diag} is required with --run.", file=sys.stderr)
+        print("Refusing to proceed: --mode {c0,c1,c0diag,c0v2} is required with --run.", file=sys.stderr)
         return 1
 
     try:
@@ -761,7 +1053,7 @@ def main():
         print(f"Refusing real GPU canary: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
-    output_root = {"c0": C0_OUTPUT_ROOT, "c1": C1_OUTPUT_ROOT, "c0diag": C0DIAG_OUTPUT_ROOT}[args.mode]
+    output_root = {"c0": C0_OUTPUT_ROOT, "c1": C1_OUTPUT_ROOT, "c0diag": C0DIAG_OUTPUT_ROOT, "c0v2": C0V2_OUTPUT_ROOT}[args.mode]
     run_label = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out_dir = os.path.join(output_root, run_label)
     os.makedirs(out_dir, exist_ok=True)
@@ -804,7 +1096,7 @@ def main():
         }
         exit_code = 0
         try:
-            mode_fn = {"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag}[args.mode]
+            mode_fn = {"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag, "c0v2": run_c0v2}[args.mode]
             summary["result"] = mode_fn(args.model_name_or_path, args.cache_dir)
         except Exception as e:  # noqa: BLE001 -- canary must record, not crash uncaught
             summary["error"] = f"{type(e).__name__}: {e}"
