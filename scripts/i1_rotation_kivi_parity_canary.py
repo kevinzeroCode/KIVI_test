@@ -15,12 +15,19 @@ Two modes:
              production path executes and measures Key distortion
              separately for each route. Generated tokens are NOT required
              to match between the two quantizers at K2.
+  --mode c0diag  Stage I1-C0D numerical attribution diagnostic (read-only
+             relative to c0/c1's own code): given the original --mode c0
+             FAIL, determines whether the observed differences come from
+             ordinary FP16 representation rounding or a genuine production
+             mismatch. One rotation_kivi K16/V16 model load only; defines
+             no new pass/fail gate, reports raw numbers.
 
-Both modes require an explicit --run flag; omitting it (or any git-dirty /
+All modes require an explicit --run flag; omitting it (or any git-dirty /
 conflicting-process / GPU-busy condition) refuses before any GPU work.
-Writes only under outputs/i1_rotation_kivi_canary/{c0,c1}/ -- never
+Writes only under outputs/i1_rotation_kivi_canary/{c0,c1,c0diag}/ -- never
 outputs/layer_attention_feature_pilot/ or outputs/layer_sensitivity_pilot/
-(frozen/reserved Stage-H/Stage-E data).
+(frozen/reserved Stage-H/Stage-E data), and never overwrites a prior run
+(each run gets its own UTC-timestamped subdirectory).
 
 Reuses production code directly wherever possible -- never reimplements:
   - scripts.h2_attention_decode_parity_canary: LayerCallCapture,
@@ -56,6 +63,9 @@ sys.path.insert(0, REPO_ROOT)
 DEFAULT_OUTPUT_ROOT = os.path.join(REPO_ROOT, "outputs", "i1_rotation_kivi_canary")
 C0_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c0")
 C1_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c1")
+# Stage I1-C0D: numerical attribution diagnostic. Separate root -- never
+# overwrites a historical C0 run.
+C0DIAG_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "c0diag")
 
 DEFAULT_MODEL_NAME = "lmsys/longchat-7b-v1.5-32k"
 DEFAULT_CACHE_DIR = "./cached_models"
@@ -580,12 +590,151 @@ def run_c1(model_name_or_path=DEFAULT_MODEL_NAME, cache_dir=DEFAULT_CACHE_DIR):
 
 
 # ---------------------------------------------------------------------------
+# C0D: numerical attribution diagnostic (Stage I1-C0D). Read-only relative
+# to run_c0/run_c1/compute_c0_structural_gate -- does not call, wrap, or
+# modify any of them, and does not touch models/llama_kivi.py,
+# utils/hadamard.py, or the quant/ kernels. Only ONE fresh model load
+# (rotation_kivi K16/V16); the reference route is never re-run here --
+# Section 10's downstream comparison is satisfied by quoting the ALREADY-
+# FROZEN original C0 result rather than recomputing it.
+# ---------------------------------------------------------------------------
+
+def run_c0diag(model_name_or_path=DEFAULT_MODEL_NAME, cache_dir=DEFAULT_CACHE_DIR):
+    """Determines whether the C0 numerical differences come from ordinary
+    FP16 representation rounding (Section 6/7: an FP32 orthogonal oracle
+    isolates pure rotation math from any storage precision; an FP16
+    representation oracle then isolates the cost of storing/using that
+    rotated representation at FP16) or a genuine mismatch between the
+    intended rotated computation and the real production path (Section 8:
+    production pre_softmax_logits vs the independently reconstructed FP16
+    rotated reference). Defines NO new pass/fail gate -- raw numbers only,
+    per Section 2/8/11.
+    """
+    import math
+
+    import torch
+
+    from scripts.h2_attention_decode_parity_canary import tensor_diff_report
+    from utils.attention_decode_features import ShadowKVCache
+    from utils.hadamard import apply_hadamard_rotation, get_normalized_hadamard, normalized_hadamard_matrix
+
+    model, tokenizer, model_class = _fresh_model_load(model_name_or_path, cache_dir, C0_K_BITS, C0_V_BITS, "rotation_kivi")
+    prompt = _load_prompt(tokenizer, model_name_or_path)
+    rot = _generate_and_capture(model, tokenizer, prompt)
+    head_dim = rot["head_dim"]
+    calls = rot["calls"]
+    _release_model(model)
+
+    if len(calls) < 3:
+        raise RuntimeError(f"expected >=3 layer-0 calls, got {len(calls)}")
+
+    prefill_call = calls[0]
+    decode_calls = calls[1:]
+
+    # --- Section 5: raw FP16 shadow history, built ONLY from captured raw
+    # post-RoPE tensors, entirely outside the production cache, never fed
+    # back into generation (generation already finished above). ---
+    raw_shadow = ShadowKVCache()
+    raw_shadow.seed_prefill(prefill_call["k_post_rope"], prefill_call["v_current"])
+
+    H32 = normalized_hadamard_matrix(head_dim, dtype=torch.float32).to(prefill_call["k_post_rope"].device)
+
+    def _prob_diff(a, b):
+        diff = (a.float() - b.float()).abs()
+        diff_norm = torch.linalg.vector_norm((a.float() - b.float()).double())
+        ref_norm = torch.clamp(torch.linalg.vector_norm(b.float().double()), min=1e-12)
+        return {"max_abs_diff": float(diff.max().item()), "relative_l2": float((diff_norm / ref_norm).item())}
+
+    step_records = []
+    for step_idx, call in enumerate(decode_calls, start=1):
+        # "K = full raw FP16 shadow cache through the current step" -- this
+        # step's own raw K must already be appended before it is used.
+        raw_shadow.append_decode_step(call["k_post_rope"], call["v_current"])
+
+        Q = call["q_post_rope"]
+        K = raw_shadow.k()
+
+        # --- Section 6: FP32 orthogonal oracle -- no production tensor involved ---
+        Qf = Q.float()
+        Kf = K.float()
+        L_raw32 = torch.matmul(Qf, Kf.transpose(2, 3)) / math.sqrt(head_dim)
+        QH32 = torch.matmul(Qf, H32)
+        KH32 = torch.matmul(Kf, H32)
+        L_rot32 = torch.matmul(QH32, KH32.transpose(2, 3)) / math.sqrt(head_dim)
+        fp32_orthogonal_oracle = tensor_diff_report(L_rot32, L_raw32, f"fp32_raw_vs_rotated_step{step_idx}")
+
+        # --- Section 7: FP16 representation oracle -- same effective dtype
+        # semantics as production (fp16 tensors, fp16-dtype matmul output,
+        # division by a python float keeps the fp16 dtype). ---
+        QH16 = QH32.to(torch.float16)
+        KH16 = KH32.to(torch.float16)
+        L_rot16_ref = torch.matmul(QH16, KH16.transpose(2, 3)) / math.sqrt(head_dim)
+        fp16_representation_error = tensor_diff_report(L_rot16_ref, L_rot32, f"fp32_rotated_vs_fp16_representation_step{step_idx}")
+
+        # Diagnostic-only: the CURRENT implementation's own rotation
+        # utility against this same manual construction -- proves
+        # apply_hadamard_rotation itself is not an additional error source.
+        H16 = get_normalized_hadamard(head_dim, Q.device, torch.float16)
+        Q_via_apply = apply_hadamard_rotation(Q, H16)
+        K_via_apply = apply_hadamard_rotation(K, H16)
+        apply_hadamard_vs_manual_Q = tensor_diff_report(Q_via_apply, QH16, f"apply_hadamard_vs_manual_Q_step{step_idx}")
+        apply_hadamard_vs_manual_K = tensor_diff_report(K_via_apply, KH16, f"apply_hadamard_vs_manual_K_step{step_idx}")
+
+        # --- Section 8: production attribution (load-bearing) ---
+        L_production = call.get("pre_softmax_logits")
+        production_attribution = (
+            tensor_diff_report(L_production, L_rot16_ref, f"production_vs_fp16_reference_step{step_idx}")
+            if L_production is not None else None
+        )
+
+        # --- Section 9: softmax probability diagnostic (descriptive only, no gate) ---
+        p_raw32 = torch.softmax(L_raw32.float(), dim=-1)
+        p_rot32 = torch.softmax(L_rot32.float(), dim=-1)
+        p_rot16_ref = torch.softmax(L_rot16_ref.float(), dim=-1)
+        softmax_diagnostic = {
+            "raw32_vs_rot32": _prob_diff(p_raw32, p_rot32),
+            "rot32_vs_rot16_ref": _prob_diff(p_rot32, p_rot16_ref),
+        }
+        post_softmax_production = call.get("post_softmax_weights")
+        if post_softmax_production is not None:
+            softmax_diagnostic["rot16_ref_vs_production"] = _prob_diff(p_rot16_ref, post_softmax_production.float())
+
+        step_records.append(
+            {
+                "step": step_idx,
+                "fp32_orthogonal_oracle": fp32_orthogonal_oracle,
+                "fp16_representation_error": fp16_representation_error,
+                "apply_hadamard_vs_manual_Q": apply_hadamard_vs_manual_Q,
+                "apply_hadamard_vs_manual_K": apply_hadamard_vs_manual_K,
+                "production_attribution": production_attribution,
+                "softmax_diagnostic": softmax_diagnostic,
+            }
+        )
+
+    return {
+        "mode": "c0diag",
+        "policy": f"K{C0_K_BITS}/V{C0_V_BITS} family=rotation_kivi",
+        "model_class": model_class,
+        "num_layer0_calls": len(calls),
+        "step_records": step_records,
+        "generated_ids": rot["ids_with_hooks"],
+        "hook_neutral": rot["hook_neutral"],
+        "downstream_output_comparison_note": (
+            "attn_output_pre_o_proj vs standard K16/V16 is NOT recomputed here (Section 10) -- "
+            "see the frozen original C0 result at "
+            "outputs/i1_rotation_kivi_canary/c0/20260907T054459769185Z/parity_summary.json "
+            "for that descriptive confirmation (all 5 steps allclose_1e-3=true)."
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--mode", choices=["c0", "c1"], required=False, default=None)
+    p.add_argument("--mode", choices=["c0", "c1", "c0diag"], required=False, default=None)
     p.add_argument("--run", action="store_true", help="Real GPU execution. Required for any mode to touch the GPU.")
     p.add_argument("--model_name_or_path", default=DEFAULT_MODEL_NAME)
     p.add_argument("--cache_dir", default=DEFAULT_CACHE_DIR)
@@ -598,12 +747,12 @@ def main():
     if not args.run:
         print(
             "Refusing to proceed: --run was not given. Real Stage I1-C GPU canaries "
-            "(--mode c0 / --mode c1) never execute without an explicit --run flag.",
+            "(--mode c0 / --mode c1 / --mode c0diag) never execute without an explicit --run flag.",
             file=sys.stderr,
         )
         return 1
     if args.mode is None:
-        print("Refusing to proceed: --mode {c0,c1} is required with --run.", file=sys.stderr)
+        print("Refusing to proceed: --mode {c0,c1,c0diag} is required with --run.", file=sys.stderr)
         return 1
 
     try:
@@ -612,7 +761,7 @@ def main():
         print(f"Refusing real GPU canary: {type(e).__name__}: {e}", file=sys.stderr)
         return 1
 
-    output_root = C0_OUTPUT_ROOT if args.mode == "c0" else C1_OUTPUT_ROOT
+    output_root = {"c0": C0_OUTPUT_ROOT, "c1": C1_OUTPUT_ROOT, "c0diag": C0DIAG_OUTPUT_ROOT}[args.mode]
     run_label = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     out_dir = os.path.join(output_root, run_label)
     os.makedirs(out_dir, exist_ok=True)
@@ -655,7 +804,8 @@ def main():
         }
         exit_code = 0
         try:
-            summary["result"] = run_c0(args.model_name_or_path, args.cache_dir) if args.mode == "c0" else run_c1(args.model_name_or_path, args.cache_dir)
+            mode_fn = {"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag}[args.mode]
+            summary["result"] = mode_fn(args.model_name_or_path, args.cache_dir)
         except Exception as e:  # noqa: BLE001 -- canary must record, not crash uncaught
             summary["error"] = f"{type(e).__name__}: {e}"
             exit_code = 1

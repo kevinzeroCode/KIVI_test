@@ -308,5 +308,116 @@ class ValueRepresentationOnlyClaimTest(unittest.TestCase):
             self.assertNotIn("improves accuracy", lowered)
 
 
+class C0BehaviorUnchangedByC0DiagTest(unittest.TestCase):
+    """Stage I1-C0D Section 3: c0diag must be a strictly additive
+    read-only diagnostic -- these tests prove run_c0/run_c1/
+    compute_c0_structural_gate were not touched to add it."""
+
+    def test_c0_and_c1_and_gate_functions_still_exist_unchanged_in_signature(self):
+        self.assertEqual(list(inspect.signature(i1.run_c0).parameters), ["model_name_or_path", "cache_dir"])
+        self.assertEqual(list(inspect.signature(i1.run_c1).parameters), ["model_name_or_path", "cache_dir"])
+        self.assertEqual(
+            list(inspect.signature(i1.compute_c0_structural_gate).parameters),
+            ["cache_checks", "decode_invariance_records", "production_comparison_records",
+             "generated_prefix_equal", "hook_neutral_reference", "hook_neutral_rotation", "finite_checks"],
+        )
+
+    def test_run_c0_source_never_mentions_c0diag(self):
+        source = inspect.getsource(i1.run_c0)
+        self.assertNotIn("c0diag", source)
+
+    def test_run_c1_source_never_mentions_c0diag(self):
+        source = inspect.getsource(i1.run_c1)
+        self.assertNotIn("c0diag", source)
+
+    def test_compute_c0_structural_gate_source_never_mentions_c0diag(self):
+        source = inspect.getsource(i1.compute_c0_structural_gate)
+        self.assertNotIn("c0diag", source)
+
+    def test_c0diag_never_calls_run_c0_or_run_c1(self):
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertNotIn("run_c0(", source)
+        self.assertNotIn("run_c1(", source)
+        self.assertNotIn("compute_c0_structural_gate(", source)
+
+    def test_mode_dispatch_still_resolves_c0_and_c1_to_the_same_functions(self):
+        # The refactor from a ternary to a dict lookup must be behaviorally
+        # identical -- same function objects, not reimplementations.
+        source = inspect.getsource(i1.main)
+        self.assertIn('{"c0": run_c0, "c1": run_c1, "c0diag": run_c0diag}', source)
+
+    def test_models_llama_kivi_and_hadamard_and_kernels_not_imported_by_this_module_at_module_level(self):
+        # c0diag must not require touching production files -- confirmed by
+        # this canary script itself never importing them at module level
+        # (only ever inside function bodies, deferred).
+        with open(i1.__file__, "r", encoding="utf-8") as f:
+            head = "".join(f.readlines()[:60])
+        self.assertNotIn("import models.llama_kivi", head)
+        self.assertNotIn("from utils.hadamard", head)
+        self.assertNotIn("from quant.", head)
+
+
+class C0DiagDesignTest(unittest.TestCase):
+    """Source-level checks for the new --mode c0diag path -- no GPU run."""
+
+    def test_mode_choices_include_c0diag_alongside_c0_c1(self):
+        args = i1.parse_args(["--run", "--mode", "c0diag"])
+        self.assertEqual(args.mode, "c0diag")
+
+    def test_c0diag_output_root_distinct_from_c0_and_c1(self):
+        self.assertNotEqual(i1.C0DIAG_OUTPUT_ROOT, i1.C0_OUTPUT_ROOT)
+        self.assertNotEqual(i1.C0DIAG_OUTPUT_ROOT, i1.C1_OUTPUT_ROOT)
+        self.assertTrue(i1.C0DIAG_OUTPUT_ROOT.endswith("/c0diag"))
+        self.assertIn("i1_rotation_kivi_canary", i1.C0DIAG_OUTPUT_ROOT)
+
+    def test_c0diag_uses_c0_bit_widths_not_c1(self):
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertIn("C0_K_BITS, C0_V_BITS", source)
+        self.assertNotIn("C1_K_BITS", source)
+        self.assertNotIn("C1_V_BITS", source)
+
+    def test_c0diag_only_loads_rotation_kivi_never_kivi_reference(self):
+        # Section 5/8: only the rotation trajectory is (re)run; the
+        # reference route is never re-loaded here.
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertEqual(source.count("_fresh_model_load("), 1)
+        self.assertIn('"rotation_kivi"', source)
+
+    def test_c0diag_defines_no_new_pass_fail_gate(self):
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertNotIn("overall_pass", source)
+        self.assertNotIn('"pass"', source)
+        self.assertNotIn("structural_gate", source)
+
+    def test_c0diag_references_frozen_original_c0_run_not_a_recomputation(self):
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertIn("20260907T054459769185Z", source)
+        self.assertIn("NOT recomputed", source)
+
+    def test_fp32_oracle_uses_float32_not_float64_or_float16(self):
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertIn("Qf = Q.float()", source)
+        self.assertIn("Kf = K.float()", source)
+
+    def test_fp16_oracle_casts_from_fp32_rotated_not_directly_from_raw(self):
+        # Section 7's QH16/KH16 must derive from the FP32-rotated
+        # intermediate (QH32/KH32), not recompute the rotation directly in
+        # fp16 from Q/K -- otherwise it would not isolate representation
+        # error from rotation-math error.
+        source = inspect.getsource(i1.run_c0diag)
+        self.assertIn("QH16 = QH32.to(torch.float16)", source)
+        self.assertIn("KH16 = KH32.to(torch.float16)", source)
+
+    def test_raw_shadow_never_fed_back_into_generation(self):
+        source = inspect.getsource(i1.run_c0diag)
+        # generation happens via _generate_and_capture BEFORE the shadow is
+        # ever constructed -- the shadow object is never passed to model,
+        # tokenizer, or any generate call.
+        shadow_construction_idx = source.index("raw_shadow = ShadowKVCache()")
+        generate_call_idx = source.index("_generate_and_capture(")
+        self.assertLess(generate_call_idx, shadow_construction_idx)
+        self.assertNotIn("model.generate", source)
+
+
 if __name__ == "__main__":
     unittest.main()
