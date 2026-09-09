@@ -684,13 +684,95 @@ def i2b_canary_conditions(layers=CANARY_LAYERS, families=CANARY_FAMILIES):
     return [{"layer_idx": l, "family": f} for l in layers for f in families]
 
 
-def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir):  # pragma: no cover - GPU path, not exercised in Stage I2A
+def _validate_quantized_key_cache_shapes(state):
+    """Structural (not merely non-None) validation of one decode step's
+    real KIVI Key cache tuple. Reuses
+    utils.attention_decode_features.parse_kivi_cache_tuple's field
+    semantics unchanged -- never invents a new cache format.
+
+    Per the triton_quantize_and_pack_along_last_dim contract
+    (quant/new_pack.py, read but not modified): for input shape
+    (B, nh, head_dim, T), key_quant_trans, key_scale_trans, and
+    key_mn_trans all come back with the SAME leading (B, nh, head_dim)
+    shape -- only their trailing dimension differs (packed sequence length
+    for key_quant_trans vs. number of quantization groups for scale/mn).
+    That leading-3-dims agreement, plus "every present tensor has
+    strictly positive dimensions everywhere", is exactly what this checks.
+
+    key_full (the FP16 residual) is deliberately NOT required merely
+    because key_quant_trans is present: models/llama_kivi.py's prefill
+    branch legitimately sets key_states_full = None when the prefill
+    length is an exact multiple of residual_length (the whole prefill is
+    quantized, no residual remains) -- requiring key_full unconditionally
+    would be inventing a stricter cache format than production actually
+    guarantees. When key_full IS present, its shape is still checked for
+    positive dimensions like every other present tensor.
+    """
+    if state.key_quant_trans is None:
+        return True  # nothing quantized yet at this step -- not a shape failure
+    quantized_tensors = [state.key_quant_trans, state.key_scale_trans, state.key_mn_trans]
+    if any(t is None for t in quantized_tensors):
+        return False  # a quantized prefix without its scale/mn is malformed
+    tensors_to_check = list(quantized_tensors)
+    if state.key_full is not None:
+        tensors_to_check.append(state.key_full)
+    for t in tensors_to_check:
+        if len(t.shape) == 0 or any(d <= 0 for d in t.shape):
+            return False
+    leading_shapes = {tuple(t.shape[:3]) for t in quantized_tensors}
+    if len(leading_shapes) != 1:
+        return False
+    return True
+
+
+def _make_finite_check_hook():
+    """Returns (hook_fn, flags): flags['seen_nonfinite'] flips to True the
+    first time a forward output is not fully finite (NaN/Inf). Extracted
+    as a standalone function (rather than an inline closure) so its
+    control logic is independently CPU-testable without a GPU or a real
+    model -- see tests/test_i2_layer_family_sensitivity.py.
+
+    Read-only by construction: `_hook` returns None, so
+    register_forward_hook leaves the module's real output completely
+    unchanged (nn.Module.register_forward_hook only replaces the output if
+    the hook returns a non-None value). This is the exact same pattern
+    already established, unmodified, in
+    run_condition()/run_layer_sensitivity_pilot.py's `_lm_head_hook` --
+    reused here, not reinvented. Because it never mutates output, it can
+    be installed identically on both the hooks-on and hooks-off
+    generate_with_capture() calls without biasing the hook-neutrality
+    comparison between them."""
+    import torch
+
+    flags = {"seen_nonfinite": False}
+
+    def _hook(module, inp, output):
+        if not torch.isfinite(output).all():
+            flags["seen_nonfinite"] = True
+
+    return _hook, flags
+
+
+def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir):  # pragma: no cover - GPU path, exercised only by explicit --mode canary --run
     """One (layer, family) I2B canary observation. Reuses
     scripts/h2_attention_decode_parity_canary.py's load_canary_model
     (already generalized over layer_idx/family/group_size/residual_length
     and already asserts the target-layer-vs-all-others policy shape) and
     generate_with_capture directly -- never reimplemented. Deferred (heavy)
-    imports happen here only."""
+    imports happen here only.
+
+    `generation_finite` requires BOTH that every generated token id is a
+    well-formed int AND that no lm_head forward output was non-finite
+    (NaN/Inf) during either generate() call -- reusing, unmodified, the
+    exact same read-only forward-hook pattern already established in
+    run_condition()/run_layer_sensitivity_pilot.py's `_lm_head_hook`
+    (never a production-code change). The hook only reads `output`; since
+    its callback returns None, register_forward_hook leaves the module's
+    real output completely unchanged, so installing it identically on both
+    the hooks-on and hooks-off generate() calls cannot bias the
+    hook-neutrality comparison between them -- it is present symmetrically
+    on both sides. Installed immediately before, removed immediately
+    after, this condition's two generate() calls only."""
     import torch
     from datasets import load_dataset
 
@@ -707,6 +789,8 @@ def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir): 
         "cache_shapes_valid": False, "generation_finite": False, "hook_neutral": False,
         "ran_without_error": False, "error": None,
     }
+    model = None
+    finite_hook_handle = None
     try:
         model, tokenizer, model_class_name = load_canary_model(
             model_name_or_path, cache_dir, I2_K_BITS, I2_V_BITS, CANARY_SEED,
@@ -716,6 +800,9 @@ def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir): 
         # internally (raises CanaryError on mismatch); reaching here means
         # policy resolution was correct.
         result["policy_resolved_correctly"] = True
+
+        finite_check_hook, nonfinite_flags = _make_finite_check_hook()
+        finite_hook_handle = model.lm_head.register_forward_hook(finite_check_hook)
 
         data = load_dataset("THUDM/LongBench", CANARY_TASK, split="test", trust_remote_code=True)
         json_obj = data[CANARY_DATASET_INDEX]
@@ -728,8 +815,9 @@ def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir): 
         ids_without_hooks, _, _ = generate_with_capture(
             model, tokenizer, prompt, CANARY_MAX_NEW_TOKENS, capture=False, layer_idx=layer_idx
         )
+        result["generated_token_count"] = len(ids_with_hooks)
         result["hook_neutral"] = ids_with_hooks == ids_without_hooks
-        result["generation_finite"] = all(isinstance(t, int) for t in ids_with_hooks)
+        result["generation_finite"] = all(isinstance(t, int) for t in ids_with_hooks) and not nonfinite_flags["seen_nonfinite"]
 
         quantized_prefix_observed = False
         cache_shapes_valid = True
@@ -741,12 +829,7 @@ def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir): 
             state = parse_kivi_cache_tuple(past_in)
             if state.key_quant_trans is not None:
                 quantized_prefix_observed = True
-                shapes_ok = (
-                    state.key_scale_trans is not None
-                    and state.key_mn_trans is not None
-                    and state.key_quant_trans.shape[0] == state.key_scale_trans.shape[0] == state.key_mn_trans.shape[0]
-                )
-                cache_shapes_valid = cache_shapes_valid and shapes_ok
+            cache_shapes_valid = cache_shapes_valid and _validate_quantized_key_cache_shapes(state)
             cache_observations.append(
                 {
                     "key_quant_trans_present": state.key_quant_trans is not None,
@@ -760,12 +843,148 @@ def run_i2b_canary_condition(layer_idx, family, model_name_or_path, cache_dir): 
         result["cache_shapes_valid"] = cache_shapes_valid
         result["cache_observations"] = cache_observations
         result["ran_without_error"] = True
-
-        del model
-        torch.cuda.empty_cache() if torch.cuda.is_available() else None
     except Exception as e:  # noqa: BLE001 -- canary must record, not crash uncaught
         result["error"] = f"{type(e).__name__}: {e}"
+    finally:
+        if finite_hook_handle is not None:
+            finite_hook_handle.remove()
+        if model is not None:
+            del model
+        import gc
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     return result
+
+
+# I2B writes only under this dedicated subtree -- never a formal condition
+# output directory (output_dir_name() always produces
+# "<condition_id>_<hash12>", which can never equal or collide with
+# "canary" or anything under it), and never
+# outputs/i1_rotation_kivi_canary/, outputs/layer_sensitivity_pilot/,
+# outputs/layer_attention_feature_pilot/, or pred/.
+I2B_OUTPUT_ROOT = os.path.join(DEFAULT_OUTPUT_ROOT, "canary")
+
+
+def i2b_preflight_checks():
+    """Torch-free safety gate mirroring
+    scripts/i1_rotation_kivi_parity_canary.py::preflight_checks exactly
+    (same checks, same order, same fail-closed behavior): clean git tree,
+    known HEAD, no conflicting generator process, fresh GPU preflight. Run
+    BEFORE any heavy import. Raises on any failure; never kills/modifies a
+    process."""
+    git_status = get_git_status_short()
+    if git_status is None:
+        raise I2ConfigError("could not determine git status; refusing to run for provenance safety")
+    if git_status.strip():
+        raise I2ConfigError(f"git working tree is not clean; refusing GPU canary. git status --short:\n{git_status}")
+    collection_head = get_git_commit()
+    if not collection_head:
+        raise I2ConfigError("could not determine git HEAD commit; refusing to run")
+    conflicts = check_no_conflicting_process()
+    if conflicts:
+        raise I2ConflictError(f"conflicting process(es) detected, refusing to launch: {conflicts}")
+    preflight = gpu_preflight()
+    if preflight.get("warning"):
+        raise I2ConfigError(f"GPU preflight refused launch: {preflight['warning']}")
+    return collection_head, preflight
+
+
+def run_i2b_canary(args):  # pragma: no cover - GPU path, exercised only by explicit --mode canary --run
+    """Top-level I2B orchestration. Executes exactly the 6 canary
+    conditions (i2b_canary_conditions(): layers 0/18/31 x kivi/
+    rotation_kivi, K2/V16) SEQUENTIALLY -- run_i2b_canary_condition
+    releases its model (del + gc.collect + torch.cuda.empty_cache, in a
+    finally, regardless of success/failure) before this loop starts the
+    next condition, so two 7B models are never resident simultaneously.
+    Reuses run_i2b_canary_condition/compute_i2b_canary_gate unmodified;
+    this function only orchestrates + writes provenance. Writes only under
+    I2B_OUTPUT_ROOT (outputs/i2_layer_family_sensitivity/canary/<run_label>/),
+    mirroring scripts/i1_rotation_kivi_parity_canary.py::main's provenance
+    shape (per-run UTC-timestamped directory, canary.lock, host_monitor.log,
+    a single JSON summary)."""
+    import torch
+
+    collection_head, preflight = i2b_preflight_checks()
+
+    if not torch.cuda.is_available():
+        raise I2CanaryError("CUDA is not available; the I2B canary requires a real GPU.")
+
+    run_label = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    out_dir = os.path.join(I2B_OUTPUT_ROOT, run_label)
+    os.makedirs(out_dir, exist_ok=True)
+    lock_fh = acquire_i2_lock(os.path.join(out_dir, "canary.lock"))
+    log_path = os.path.join(out_dir, "host_monitor.log")
+
+    def log(msg):
+        line = f"{datetime.now(timezone.utc).isoformat()} {msg}"
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        print(line)
+
+    try:
+        boot_id_start = get_boot_id()
+        gpu_before = gpu_snapshot()
+        log(f"start mode=canary run_label={run_label} boot_id={boot_id_start} HEAD={collection_head}")
+
+        summary = {
+            "mode": "canary",
+            "run_label": run_label,
+            "collection_head": collection_head,
+            "boot_id_start": boot_id_start,
+            "git_status_short": get_git_status_short(),
+            "cuda_device": torch.cuda.get_device_name(0),
+            "triton_ptxas_path": os.environ.get("TRITON_PTXAS_PATH"),
+            "gpu_before": gpu_before,
+            "gpu_preflight": preflight,
+            "canary_task": CANARY_TASK,
+            "canary_dataset_index": CANARY_DATASET_INDEX,
+            "canary_seed": CANARY_SEED,
+            "group_size": I2_GROUP_SIZE,
+            "residual_length": I2_RESIDUAL_LENGTH,
+            "max_new_tokens": CANARY_MAX_NEW_TOKENS,
+            "model_name_or_path": args.model_name_or_path,
+        }
+
+        exit_code = 0
+        condition_results = []
+        try:
+            for cond in i2b_canary_conditions():
+                log(f"condition start layer={cond['layer_idx']} family={cond['family']}")
+                raw_result = run_i2b_canary_condition(cond["layer_idx"], cond["family"], args.model_name_or_path, args.cache_dir)
+                gated = compute_i2b_canary_gate(raw_result)
+                condition_results.append(gated)
+                log(
+                    f"condition end layer={cond['layer_idx']} family={cond['family']} "
+                    f"condition_pass={gated['condition_pass']} "
+                    f"quantized_prefix_observed={gated['quantized_prefix_observed']} "
+                    f"generated_token_count={gated.get('generated_token_count')} "
+                    f"error={gated.get('error')}"
+                )
+            summary["conditions"] = condition_results
+            summary["num_conditions"] = len(condition_results)
+            summary["overall_pass"] = len(condition_results) == 6 and all(c["condition_pass"] for c in condition_results)
+        except Exception as e:  # noqa: BLE001 -- canary must record, not crash uncaught
+            summary["error"] = f"{type(e).__name__}: {e}"
+            summary["conditions"] = condition_results
+            summary["overall_pass"] = False
+            exit_code = 1
+
+        boot_id_end = get_boot_id()
+        summary["boot_id_end"] = boot_id_end
+        summary["boot_id_stable"] = boot_id_start == boot_id_end
+        summary["gpu_after"] = gpu_snapshot()
+        summary["exit_code"] = exit_code
+
+        with open(os.path.join(out_dir, "canary_summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, indent=2, default=str)
+        log(f"end exit_code={exit_code} overall_pass={summary.get('overall_pass')}")
+        print(json.dumps(summary, indent=2, default=str))
+        print(f"\nArtifacts written to: {out_dir}")
+        return exit_code
+    finally:
+        release_i2_lock(lock_fh)
 
 
 # ---------------------------------------------------------------------------
@@ -838,10 +1057,11 @@ def main():
         if args.dry_run or not args.run:
             _print_canary_dry_run()
             return 0
-        raise I2CanaryError(
-            "I2B canary execution is not authorized by this task (Stage I2A is infrastructure/"
-            "preregistration only). Re-run with --dry-run, or obtain explicit I2B authorization first."
-        )
+        # Stage I2B: the real GPU route-validity canary is now authorized
+        # and wired. This is the ONLY path in this module that touches the
+        # GPU -- --mode generation --run (I2C formal generation) below is
+        # unaffected and still refuses unconditionally.
+        return run_i2b_canary(args)
 
     write_i2_policies(args.policies_dir)
     conditions = discover_and_validate_i2_policies(args.policies_dir, args.layers, args.families)
