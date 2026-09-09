@@ -11,6 +11,7 @@ Run with:
     ./.venv/bin/python -m unittest tests.test_i2_layer_family_sensitivity -v
 """
 import argparse
+import inspect
 import json
 import os
 import sys
@@ -918,6 +919,546 @@ class TestI2BOrchestration(unittest.TestCase):
         self.assertNotIn("i1_rotation_kivi_canary", driver.I2B_OUTPUT_ROOT)
         self.assertNotIn("layer_sensitivity_pilot", driver.I2B_OUTPUT_ROOT)
         self.assertNotIn("layer_attention_feature_pilot", driver.I2B_OUTPUT_ROOT)
+
+
+# --- I2C0: pinned dataset revision ---------------------------------------------
+
+class TestFormalDatasetRevision(unittest.TestCase):
+    def test_exact_revision_constant(self):
+        self.assertEqual(driver.I2_DATASET_REVISION, "5e628be450b7e67fb7ae6e201bd6d8f7056f7672")
+
+    def test_run_condition_defaults_to_pinned_revision(self):
+        sig = inspect.signature(driver.run_condition)
+        self.assertEqual(sig.parameters["dataset_revision"].default, driver.I2_DATASET_REVISION)
+
+    def test_run_condition_source_passes_revision_to_load_dataset(self):
+        # run_condition is a GPU path (deferred torch/datasets/pred_long_bench
+        # imports) that cannot be exercised without a real model; verify by
+        # source inspection that its load_dataset() call forwards the
+        # dataset_revision parameter rather than omitting it.
+        source = inspect.getsource(driver.run_condition)
+        self.assertIn('load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True, revision=dataset_revision)', source)
+
+    def test_run_config_includes_dataset_revision(self):
+        cond = {
+            "condition_id": "layer00_kivi", "layer_idx": 0, "family": "kivi", "k_bits": 2, "v_bits": 16,
+            "policy_path": "p.json", "resolved_policy_hash": "abc123",
+        }
+        run_config = driver.build_condition_run_config(cond, "lmsys/longchat-7b-v1.5-32k", 31500, 32, 128, 42)
+        self.assertEqual(run_config["dataset_revision"], driver.I2_DATASET_REVISION)
+
+    def test_dataset_revision_is_a_resume_core_key(self):
+        self.assertIn("dataset_revision", driver.I2_CONDITION_CORE_KEYS)
+
+    def test_resume_rejects_different_dataset_revision(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            condition_dir = os.path.join(tmp, "cond")
+            cond = {
+                "condition_id": "layer00_kivi", "layer_idx": 0, "family": "kivi", "k_bits": 2, "v_bits": 16,
+                "policy_path": "p.json", "resolved_policy_hash": "abc123",
+            }
+            rc_a = driver.build_condition_run_config(cond, "lmsys/longchat-7b-v1.5-32k", 31500, 32, 128, 42, dataset_revision="oldrev")
+            rc_b = driver.build_condition_run_config(cond, "lmsys/longchat-7b-v1.5-32k", 31500, 32, 128, 42, dataset_revision="newrev")
+            driver.prepare_condition_directory(condition_dir, rc_a)
+            with self.assertRaises(driver.I2ConfigError):
+                driver.prepare_condition_directory(condition_dir, rc_b)
+
+    def test_resume_rejects_missing_dataset_revision_in_legacy_run_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            condition_dir = os.path.join(tmp, "cond")
+            os.makedirs(condition_dir)
+            legacy_run_config = {
+                "model_name_or_path": "lmsys/longchat-7b-v1.5-32k", "condition_id": "layer00_kivi",
+                "layer_idx": 0, "family": "kivi", "k_bits": 2, "v_bits": 16, "policy_path": "p.json",
+                "policy_hash": "abc123", "max_length": 31500, "group_size": 32, "residual_length": 128, "seed": 42,
+                # deliberately no "dataset_revision" key -- a pre-I2C0 legacy run_config.json
+            }
+            with open(os.path.join(condition_dir, "run_config.json"), "w", encoding="utf-8") as f:
+                json.dump(legacy_run_config, f)
+            cond = {
+                "condition_id": "layer00_kivi", "layer_idx": 0, "family": "kivi", "k_bits": 2, "v_bits": 16,
+                "policy_path": "p.json", "resolved_policy_hash": "abc123",
+            }
+            new_run_config = driver.build_condition_run_config(cond, "lmsys/longchat-7b-v1.5-32k", 31500, 32, 128, 42)
+            with self.assertRaises(driver.I2ConfigError):
+                driver.prepare_condition_directory(condition_dir, new_run_config)
+
+
+# --- I2C0: fail-closed dataset identity preflight -------------------------------
+
+class _FakeLongBenchDataset(list):
+    pass
+
+
+def _fake_datasets_module(rows_by_task, raise_for_task=None):
+    module = SimpleNamespace()
+
+    def _load_dataset(repo, task, split=None, trust_remote_code=None, revision=None):
+        if raise_for_task is not None and task == raise_for_task:
+            raise RuntimeError(f"could not resolve revision {revision!r} for task {task!r}")
+        return _FakeLongBenchDataset(range(rows_by_task[task]))
+
+    module.load_dataset = _load_dataset
+    return module
+
+
+class TestDatasetIdentityPreflight(unittest.TestCase):
+    def test_matching_counts_passes_and_reports_all_six_tasks(self):
+        fake_module = _fake_datasets_module(dict(driver.I2_TASK_COUNTS))
+        with mock.patch.dict(sys.modules, {"datasets": fake_module}):
+            report = driver.i2c_dataset_identity_preflight()
+        self.assertEqual(len(report), 6)
+        for row in report:
+            self.assertEqual(row["requested_revision"], driver.I2_DATASET_REVISION)
+            self.assertEqual(row["available_row_count"], row["planned_row_count"])
+
+    def test_mismatched_count_fails_closed(self):
+        counts = dict(driver.I2_TASK_COUNTS)
+        counts["trec"] = counts["trec"] - 1  # off by one
+        fake_module = _fake_datasets_module(counts)
+        with mock.patch.dict(sys.modules, {"datasets": fake_module}):
+            with self.assertRaises(driver.I2ConfigError):
+                driver.i2c_dataset_identity_preflight()
+
+    def test_unresolvable_revision_fails_closed_never_falls_back(self):
+        fake_module = _fake_datasets_module(dict(driver.I2_TASK_COUNTS), raise_for_task="lcc")
+        with mock.patch.dict(sys.modules, {"datasets": fake_module}):
+            with self.assertRaises(driver.I2ConfigError):
+                driver.i2c_dataset_identity_preflight()
+
+
+# --- I2C0: formal argument lock --------------------------------------------------
+
+def _formal_args(**overrides):
+    base = dict(
+        model_name_or_path="lmsys/longchat-7b-v1.5-32k",
+        cache_dir="./cached_models",
+        mode="generation",
+        layers=list(driver.I2_LAYERS),
+        families=list(driver.I2_FAMILIES),
+        dry_run=False,
+        run=True,
+        device=0,
+        max_length=31500,
+        group_size=driver.I2_GROUP_SIZE,
+        residual_length=driver.I2_RESIDUAL_LENGTH,
+        seed=42,
+        output_root=driver.DEFAULT_OUTPUT_ROOT,
+        policies_dir=driver.DEFAULT_POLICIES_DIR,
+    )
+    base.update(overrides)
+    return argparse.Namespace(**base)
+
+
+class TestFormalArgumentLock(unittest.TestCase):
+    def test_exact_universe_passes(self):
+        driver.validate_formal_i2c_arguments(_formal_args())  # must not raise
+
+    def test_reversed_layer_order_still_passes_normalized(self):
+        driver.validate_formal_i2c_arguments(_formal_args(layers=list(reversed(driver.I2_LAYERS))))
+
+    def test_wrong_model_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(model_name_or_path="some-other-model"))
+
+    def test_extra_layer_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(layers=list(driver.I2_LAYERS) + [5]))
+
+    def test_missing_layer_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(layers=list(driver.I2_LAYERS)[:-1]))
+
+    def test_subset_layers_does_not_masquerade_as_i2c(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(layers=[0, 18, 31]))  # e.g. the I2B canary's layer subset
+
+    def test_single_family_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(families=["kivi"]))
+
+    def test_wrong_max_length_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(max_length=8192))
+
+    def test_wrong_group_size_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(group_size=64))
+
+    def test_wrong_residual_length_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(residual_length=256))
+
+    def test_wrong_seed_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(seed=0))
+
+    def test_wrong_output_root_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(output_root="/tmp/not_the_formal_root"))
+
+    def test_wrong_policies_dir_fails(self):
+        with self.assertRaises(driver.I2ConfigError):
+            driver.validate_formal_i2c_arguments(_formal_args(policies_dir="/tmp/not_the_formal_policies_dir"))
+
+
+# --- I2C0: current-HEAD I2B prerequisite -----------------------------------------
+
+def _write_canary_summary(canary_root, run_label, **fields):
+    d = os.path.join(canary_root, run_label)
+    os.makedirs(d, exist_ok=True)
+    summary = {"collection_head": "headA", "overall_pass": True, "conditions": [{"condition_pass": True} for _ in range(6)]}
+    summary.update(fields)
+    with open(os.path.join(d, "canary_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(summary, f)
+    return d
+
+
+class TestI2BPrerequisiteForI2C(unittest.TestCase):
+    def test_no_canary_root_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            missing = os.path.join(tmp, "does_not_exist")
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=missing)
+
+    def test_empty_canary_root_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+
+    def test_stale_head_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_canary_summary(tmp, "20260101T000000000000Z", collection_head="OLD_HEAD")
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("NEW_HEAD", canary_root=tmp)
+
+    def test_five_of_six_conditions_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conditions = [{"condition_pass": True}] * 5 + [{"condition_pass": False}]
+            _write_canary_summary(tmp, "20260101T000000000000Z", collection_head="HEAD1", conditions=conditions, overall_pass=False)
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+
+    def test_overall_pass_false_rejected_even_with_six_conditions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_canary_summary(tmp, "20260101T000000000000Z", collection_head="HEAD1", overall_pass=False)
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+
+    def test_six_of_six_current_head_accepted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_canary_summary(tmp, "20260101T000000000000Z", collection_head="HEAD1")
+            result = driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+            self.assertTrue(result["overall_pass"])
+            self.assertEqual(len(result["conditions"]), 6)
+
+    def test_returns_most_recent_matching_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _write_canary_summary(tmp, "20260101T000000000000Z", collection_head="HEAD1", marker="old")
+            _write_canary_summary(tmp, "20260102T000000000000Z", collection_head="HEAD1", marker="new")
+            result = driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+            self.assertEqual(result["marker"], "new")
+
+    def test_unreadable_summary_json_is_skipped_not_crashed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_dir = os.path.join(tmp, "20260101T000000000000Z")
+            os.makedirs(bad_dir)
+            with open(os.path.join(bad_dir, "canary_summary.json"), "w", encoding="utf-8") as f:
+                f.write("{not valid json")
+            with self.assertRaises(driver.I2ConfigError):
+                driver.find_passing_i2b_canary_for_head("HEAD1", canary_root=tmp)
+
+
+# --- I2C0: top-level formal manifest ---------------------------------------------
+
+class TestI2CManifest(unittest.TestCase):
+    def _conditions(self):
+        return [
+            {"condition_id": "layer00_kivi", "layer_idx": 0, "family": "kivi", "k_bits": 2, "v_bits": 16,
+             "policy_path": "p0.json", "resolved_policy_hash": "hash0", "output_dir": "/tmp/out0"},
+            {"condition_id": "layer00_rotation_kivi", "layer_idx": 0, "family": "rotation_kivi", "k_bits": 2, "v_bits": 16,
+             "policy_path": "p1.json", "resolved_policy_hash": "hash1", "output_dir": "/tmp/out1"},
+        ]
+
+    def test_manifest_records_required_provenance_fields(self):
+        manifest = driver.build_initial_i2c_manifest(
+            self._conditions(), _formal_args(), "deadbeefcafe", {"checked": True, "warning": None}, [{"task": "trec"}]
+        )
+        for field in (
+            "experiment", "collection_head", "dataset_revision", "dataset_identity_preflight",
+            "model_name_or_path", "seed", "max_length", "group_size", "residual_length",
+            "tasks", "expected_task_counts", "total_planned_rows", "num_conditions",
+            "boot_id_start", "gpu_preflight", "triton_ptxas_path", "start_time", "last_update_time", "conditions",
+        ):
+            self.assertIn(field, manifest, f"missing manifest field {field!r}")
+        self.assertEqual(manifest["dataset_revision"], driver.I2_DATASET_REVISION)
+        self.assertEqual(len(manifest["conditions"]), 2)
+        self.assertTrue(all(c["status"] == "pending" for c in manifest["conditions"]))
+
+    def test_record_condition_result_updates_correct_condition_only(self):
+        manifest = driver.build_initial_i2c_manifest(
+            self._conditions(), _formal_args(), "deadbeefcafe", {"checked": True, "warning": None}, []
+        )
+        driver.record_i2c_condition_result(manifest, "layer00_kivi", status="running")
+        statuses = {c["condition_id"]: c["status"] for c in manifest["conditions"]}
+        self.assertEqual(statuses["layer00_kivi"], "running")
+        self.assertEqual(statuses["layer00_rotation_kivi"], "pending")
+
+    def test_record_condition_result_bumps_last_update_time(self):
+        manifest = driver.build_initial_i2c_manifest(
+            self._conditions(), _formal_args(), "deadbeefcafe", {"checked": True, "warning": None}, []
+        )
+        original = manifest["last_update_time"]
+        import time
+
+        time.sleep(0.01)
+        driver.record_i2c_condition_result(manifest, "layer00_kivi", status="complete", exit_code=0, nonfinite_logits_seen=False)
+        self.assertNotEqual(manifest["last_update_time"], original)
+        updated = next(c for c in manifest["conditions"] if c["condition_id"] == "layer00_kivi")
+        self.assertEqual(updated["exit_code"], 0)
+        self.assertEqual(updated["nonfinite_logits_seen"], False)
+
+    def test_record_unknown_condition_fails_closed(self):
+        manifest = driver.build_initial_i2c_manifest(
+            self._conditions(), _formal_args(), "deadbeefcafe", {"checked": True, "warning": None}, []
+        )
+        with self.assertRaises(driver.I2ConfigError):
+            driver.record_i2c_condition_result(manifest, "layer99_kivi", status="running")
+
+
+# --- I2C0: condition-completion validation (Section 14) -------------------------
+
+class TestConditionCompletionValidation(unittest.TestCase):
+    def _write_complete_condition(self, condition_dir):
+        os.makedirs(condition_dir, exist_ok=True)
+        for task, n in driver.I2_TASK_COUNTS.items():
+            _write_jsonl(os.path.join(condition_dir, f"{task}.jsonl"), [{"dataset_index": i, "pred": "p"} for i in range(n)])
+        with open(os.path.join(condition_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"exit_code": 0, "nonfinite_logits_seen": False}, f)
+
+    def test_complete_condition_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertTrue(is_complete)
+            self.assertEqual(report["problems"], [])
+            self.assertEqual(report["total_rows"], sum(driver.I2_TASK_COUNTS.values()))
+
+    def test_missing_task_file_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            os.remove(os.path.join(tmp, "samsum.jsonl"))
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+    def test_wrong_row_count_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            _write_jsonl(os.path.join(tmp, "trec.jsonl"), [{"dataset_index": i, "pred": "p"} for i in range(199)])  # one short
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+    def test_leftover_partial_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            _write_jsonl(os.path.join(tmp, "trec.jsonl.partial"), [{"dataset_index": 0, "pred": "p"}])
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+    def test_missing_condition_manifest_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            os.remove(os.path.join(tmp, "manifest.json"))
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+    def test_nonzero_exit_code_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            with open(os.path.join(tmp, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump({"exit_code": 1, "nonfinite_logits_seen": False}, f)
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+    def test_nonfinite_true_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_complete_condition(tmp)
+            with open(os.path.join(tmp, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump({"exit_code": 0, "nonfinite_logits_seen": True}, f)
+            is_complete, report = driver.validate_condition_completion(tmp)
+            self.assertFalse(is_complete)
+
+
+class TestAggregateCompletion(unittest.TestCase):
+    def _write_complete_condition(self, condition_dir):
+        os.makedirs(condition_dir, exist_ok=True)
+        for task, n in driver.I2_TASK_COUNTS.items():
+            _write_jsonl(os.path.join(condition_dir, f"{task}.jsonl"), [{"dataset_index": i, "pred": "p"} for i in range(n)])
+        with open(os.path.join(condition_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"exit_code": 0, "nonfinite_logits_seen": False}, f)
+
+    def _conditions(self, n=16):
+        specs = driver.i2b_canary_conditions(layers=driver.I2_LAYERS, families=driver.I2_FAMILIES)[:n]
+        return [{"condition_id": f"cond{i}", "resolved_policy_hash": f"h{i}", **c} for i, c in enumerate(specs)]
+
+    def test_all_16_complete_gives_23200_rows_and_all_complete_true(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conditions = self._conditions()
+            for c in conditions:
+                self._write_complete_condition(os.path.join(tmp, driver.output_dir_name(c)))
+            result = driver.validate_formal_generation_complete(conditions, tmp)
+            self.assertTrue(result["all_complete"])
+            self.assertEqual(result["rows_total"], 23200)
+            self.assertEqual(result["rows_complete"], 23200)
+            self.assertEqual(result["conditions_complete"], 16)
+            self.assertEqual(result["task_files_complete"], 96)
+
+    def test_one_incomplete_condition_fails_aggregate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conditions = self._conditions()
+            for c in conditions:
+                self._write_complete_condition(os.path.join(tmp, driver.output_dir_name(c)))
+            # Break one condition's samsum.jsonl.
+            broken_dir = os.path.join(tmp, driver.output_dir_name(conditions[5]))
+            os.remove(os.path.join(broken_dir, "samsum.jsonl"))
+            result = driver.validate_formal_generation_complete(conditions, tmp)
+            self.assertFalse(result["all_complete"])
+            self.assertEqual(result["conditions_complete"], 15)
+
+
+# --- I2C0: CLI wiring / orchestration (mocked GPU) -------------------------------
+
+class TestI2CCliWiring(unittest.TestCase):
+    def test_mode_generation_run_reaches_i2c_orchestration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.object(driver, "DEFAULT_OUTPUT_ROOT", tmp):
+                argv = ["--run"]
+                with mock.patch.object(sys, "argv", ["run_i2_layer_family_sensitivity.py"] + argv):
+                    with mock.patch.object(driver, "run_i2c_formal_generation", return_value=0) as mocked:
+                        rc = driver.main()
+            mocked.assert_called_once()
+            self.assertEqual(rc, 0)
+
+    def test_canary_mode_never_calls_i2c_orchestration(self):
+        argv = ["--mode", "canary", "--run"]
+        with mock.patch.object(sys, "argv", ["run_i2_layer_family_sensitivity.py"] + argv):
+            with mock.patch.object(driver, "i2b_preflight_checks", side_effect=driver.I2ConfigError("forced")):
+                with mock.patch.object(driver, "run_i2c_formal_generation") as mocked_i2c:
+                    with self.assertRaises(driver.I2ConfigError):
+                        driver.main()
+        mocked_i2c.assert_not_called()
+
+
+class TestI2CFormalOrchestration(unittest.TestCase):
+    def _complete_report(self):
+        tasks = {
+            t: {"exists": True, "valid_rows": n, "invalid_rows": 0, "expected": n, "leftover_partial": False, "ok": True}
+            for t, n in driver.I2_TASK_COUNTS.items()
+        }
+        return True, {"tasks": tasks, "problems": [], "exit_code": 0, "nonfinite_logits_seen": False,
+                       "total_rows": sum(driver.I2_TASK_COUNTS.values())}
+
+    def _run(self, tmp, run_condition_side_effect):
+        tmp_out = os.path.join(tmp, "out")
+        tmp_policies = os.path.join(tmp, "policies")
+        args = _formal_args(output_root=tmp_out, policies_dir=tmp_policies)
+        fake_torch = _FakeTorch()
+        canary_summary = {"overall_pass": True, "collection_head": "deadbeefcafe", "conditions": [{"condition_pass": True}] * 6}
+        with mock.patch.dict(sys.modules, {"torch": fake_torch}):
+            with mock.patch.object(driver, "DEFAULT_OUTPUT_ROOT", tmp_out):
+                with mock.patch.object(driver, "DEFAULT_POLICIES_DIR", tmp_policies):
+                    with mock.patch.object(driver, "i2b_preflight_checks", return_value=("deadbeefcafe", {"checked": True, "warning": None})):
+                        with mock.patch.object(driver, "i2c_dataset_identity_preflight", return_value=[{"task": "trec"}]):
+                            with mock.patch.object(driver, "find_passing_i2b_canary_for_head", return_value=canary_summary):
+                                with mock.patch.object(driver, "run_condition", side_effect=run_condition_side_effect):
+                                    with mock.patch.object(driver, "validate_condition_completion", side_effect=lambda *a, **k: self._complete_report()):
+                                        rc = driver.run_i2c_formal_generation(args)
+        return rc, tmp_out
+
+    def test_exactly_16_conditions_in_deterministic_layer_then_family_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            seen_order = []
+
+            def fake_run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=None, dataset_revision=None):
+                seen_order.append((condition["layer_idx"], condition["family"]))
+                return 0
+
+            rc, tmp_out = self._run(tmp, fake_run_condition)
+            self.assertEqual(rc, 0)
+            expected_order = [(l, f) for l in driver.I2_LAYERS for f in driver.I2_FAMILIES]
+            self.assertEqual(seen_order, expected_order)
+            self.assertEqual(len(seen_order), 16)
+
+    def test_condition_failure_stops_later_conditions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            call_count = {"n": 0}
+            exit_codes = [0, 0, 1] + [0] * 13  # fails on the 3rd condition
+
+            def fake_run_condition(*a, **k):
+                idx = call_count["n"]
+                call_count["n"] += 1
+                return exit_codes[idx]
+
+            with self.assertRaises(driver.I2ConfigError):
+                self._run(tmp, fake_run_condition)
+            self.assertEqual(call_count["n"], 3)
+
+    def test_manifest_written_with_aggregate_all_complete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, tmp_out = self._run(tmp, lambda *a, **k: 0)
+            manifest_path = os.path.join(tmp_out, driver.I2C_FORMAL_MANIFEST_NAME)
+            with open(manifest_path, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            self.assertEqual(manifest["dataset_revision"], driver.I2_DATASET_REVISION)
+            self.assertEqual(len(manifest["conditions"]), 16)
+            self.assertTrue(all(c["status"] == "complete" for c in manifest["conditions"]))
+            self.assertTrue(manifest["aggregate"]["all_complete"])
+            self.assertEqual(manifest["aggregate"]["rows_total"], 23200)
+            self.assertEqual(rc, 0)
+
+    def test_lock_file_prevents_concurrent_formal_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(tmp, exist_ok=True)
+            lock_path = os.path.join(tmp, driver.I2C_FORMAL_LOCK_NAME)
+            fh = driver.acquire_i2_lock(lock_path)
+            try:
+                with self.assertRaises(driver.I2LockError):
+                    driver.acquire_i2_lock(lock_path)
+            finally:
+                driver.release_i2_lock(fh)
+
+    def test_analysis_module_is_never_imported_or_invoked(self):
+        # Comments/docstrings legitimately NAME
+        # analysis/analyze_i2_layer_family_sensitivity.py to document that
+        # it is deliberately never called (Section 16) -- what must be
+        # absent is an actual import or call, not the string appearing in
+        # prose. Check via AST rather than a raw substring search.
+        import ast
+
+        source = Path(driver.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.assertNotIn("analyze_i2_layer_family_sensitivity", alias.name)
+            elif isinstance(node, ast.ImportFrom):
+                self.assertNotIn("analyze_i2_layer_family_sensitivity", node.module or "")
+            elif isinstance(node, ast.Call):
+                func = node.func
+                chain = []
+                while isinstance(func, ast.Attribute):
+                    chain.append(func.attr)
+                    func = func.value
+                if isinstance(func, ast.Name):
+                    chain.append(func.id)
+                self.assertNotIn("analyze_i2_layer_family_sensitivity", ".".join(reversed(chain)))
+
+    def test_formal_output_isolated_from_canary_subtree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            rc, tmp_out = self._run(tmp, lambda *a, **k: 0)
+            self.assertFalse(os.path.isdir(os.path.join(tmp_out, "canary")))
+            top_level_entries = set(os.listdir(tmp_out))
+            self.assertNotIn("canary", top_level_entries)
 
 
 # --- I2A must never touch production kernel files -----------------------------

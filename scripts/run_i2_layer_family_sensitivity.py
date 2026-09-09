@@ -93,6 +93,24 @@ CANARY_SEED = 42
 # passed (see compute_i2b_canary_gate).
 CANARY_MAX_NEW_TOKENS = 140
 
+# Stage I2C0: the pinned formal LongBench revision. docs/stage_i2_pre_registration.md
+# Section 6 flagged that no existing code path in this repo pins a
+# `revision=` kwarg, so the installed `datasets` package's current default
+# HEAD revision could silently drift out from under a multi-day, resumable
+# 23,200-row formal run. This value is a fixed, previously-OBSERVED
+# revision hash (recorded in environment/README.md / EXPERIMENT_STATUS.md
+# from an earlier one-off smoke test) -- frozen here for I2C formal
+# generation only. Historical H2/I1/Stage-D runners are deliberately left
+# unpinned/unmodified; this constant is consumed ONLY by the I2C formal
+# path (run_condition's default dataset_revision, i2c_dataset_identity_preflight).
+I2_DATASET_REVISION = "5e628be450b7e67fb7ae6e201bd6d8f7056f7672"
+
+# Filenames for the top-level formal-run lock/manifest, both written
+# directly under --output-root (a sibling of canary/, never inside it --
+# the canary subtree is never interpreted as a formal condition).
+I2C_FORMAL_LOCK_NAME = ".i2c_formal.lock"
+I2C_FORMAL_MANIFEST_NAME = "i2c_formal_manifest.json"
+
 # Any of these process name patterns running (other than this invocation
 # itself) means a conflicting generation writer might already be active.
 CONFLICTING_PROCESS_PATTERNS = [
@@ -103,8 +121,12 @@ CONFLICTING_PROCESS_PATTERNS = [
     "run_i2_layer_family_sensitivity.py",
 ]
 
+# dataset_revision participates in the resume-critical config keys
+# (Stage I2C0, Section 4): a condition directory generated under a
+# different (or missing -- pre-I2C0 legacy) dataset revision must never be
+# silently resumed as the same formal condition.
 I2_CONDITION_CORE_KEYS = [
-    "model_name_or_path", "max_length", "group_size", "residual_length", "seed", "policy_hash",
+    "model_name_or_path", "max_length", "group_size", "residual_length", "seed", "policy_hash", "dataset_revision",
 ]
 
 
@@ -277,7 +299,7 @@ def finalize_task_if_ready(action, active_path, out_path, expected):
 # Per-condition directory / config
 # ---------------------------------------------------------------------------
 
-def build_condition_run_config(condition, model_name_or_path, max_length, group_size, residual_length, seed, task_counts=I2_TASK_COUNTS):
+def build_condition_run_config(condition, model_name_or_path, max_length, group_size, residual_length, seed, task_counts=I2_TASK_COUNTS, dataset_revision=I2_DATASET_REVISION):
     return {
         "model_name_or_path": model_name_or_path,
         "condition_id": condition["condition_id"],
@@ -291,6 +313,7 @@ def build_condition_run_config(condition, model_name_or_path, max_length, group_
         "group_size": group_size,
         "residual_length": residual_length,
         "seed": seed,
+        "dataset_revision": dataset_revision,
         "tasks": list(task_counts),
         "expected_task_counts": dict(task_counts),
         "experiment": "i2_layer_family_sensitivity_stage_i2a",
@@ -479,16 +502,21 @@ def gpu_preflight(threshold_bytes=10 * 1024**3):
 # I2B -> I2C authorization plan).
 # ---------------------------------------------------------------------------
 
-def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=I2_TASK_COUNTS):  # pragma: no cover - GPU path, not exercised in Stage I2A
-    """Runs one I2A condition end to end: build the KIVI model with this
-    condition's one-target-layer policy (target layer = condition['family']
-    at K2/V16, all other layers kivi K16/V16), generate exactly
-    `task_counts` (the 6-task formal set) with durable per-row fsync +
-    exact-count resume, host-monitor sampling every 30s, then finalize.
-    Deferred (heavy) imports happen here only -- --dry-run never reaches
-    this function. Structurally identical to
+def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=I2_TASK_COUNTS, dataset_revision=I2_DATASET_REVISION):  # pragma: no cover - GPU path, exercised only by explicit --mode generation --run with the exact formal universe
+    """Runs one I2C formal condition end to end: build the KIVI model with
+    this condition's one-target-layer policy (target layer =
+    condition['family'] at K2/V16, all other layers kivi K16/V16), generate
+    exactly `task_counts` (the 6-task formal set) with durable per-row
+    fsync + exact-count resume, host-monitor sampling every 30s, then
+    finalize. Deferred (heavy) imports happen here only -- --dry-run never
+    reaches this function. Structurally identical to
     run_layer_sensitivity_pilot.run_condition, generalized from
-    (layer, axis) to (layer, family)."""
+    (layer, axis) to (layer, family).
+
+    `dataset_revision` is pinned (Stage I2C0) and forwarded verbatim to
+    every load_dataset() call and into run_config.json/manifest.json --
+    never silently defaulted to the installed `datasets` package's current
+    HEAD revision."""
     import gc
     import threading
 
@@ -501,7 +529,7 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=I
     condition_dir = os.path.join(args.output_root, output_dir_name(condition))
     run_config = build_condition_run_config(
         condition, args.model_name_or_path, args.max_length, args.group_size, args.residual_length, args.seed,
-        task_counts=task_counts,
+        task_counts=task_counts, dataset_revision=dataset_revision,
     )
     status = prepare_condition_directory(condition_dir, run_config)
 
@@ -565,7 +593,7 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=I
                 finalize_task_if_ready(action, active_path, out_path, expected)
                 continue
 
-            data = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True)
+            data = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True, revision=dataset_revision)
             prompt_format = dataset2prompt[task]
             max_gen = dataset2maxlen[task]
 
@@ -624,6 +652,7 @@ def run_condition(condition, args, dataset2prompt, dataset2maxlen, task_counts=I
             "exit_code": exit_code,
             "nonfinite_logits_seen": nan_inf_flags["seen_nonfinite"],
             "git_commit": get_git_commit(),
+            "dataset_revision": dataset_revision,
         }
         with open(os.path.join(condition_dir, "manifest.json"), "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
@@ -988,6 +1017,369 @@ def run_i2b_canary(args):  # pragma: no cover - GPU path, exercised only by expl
 
 
 # ---------------------------------------------------------------------------
+# I2C0: formal generation execution-path infrastructure (Stage I2C0).
+# Everything below is CPU-only / file-I/O-only except run_i2c_formal_generation
+# itself and the dataset-identity preflight's network call -- neither is
+# invoked by --dry-run or by anything else in this module.
+# ---------------------------------------------------------------------------
+
+def validate_formal_i2c_arguments(args):
+    """Fail-closed formal-argument lock (Section 6 of the I2C0 task): real
+    I2C execution requires EXACTLY the preregistered universe -- no
+    subset/superset run may masquerade as I2C. Only the real --run formal
+    path calls this; --dry-run remains flexible for exploration."""
+    errors = []
+    if args.model_name_or_path != "lmsys/longchat-7b-v1.5-32k":
+        errors.append(f"model_name_or_path must be exactly 'lmsys/longchat-7b-v1.5-32k', got {args.model_name_or_path!r}")
+    if sorted(args.layers) != sorted(I2_LAYERS):
+        errors.append(f"layers must be exactly {sorted(I2_LAYERS)}, got {sorted(args.layers)}")
+    if set(args.families) != set(I2_FAMILIES):
+        errors.append(f"families must be exactly {sorted(I2_FAMILIES)}, got {sorted(set(args.families))}")
+    if args.max_length != 31500:
+        errors.append(f"max_length must be exactly 31500, got {args.max_length}")
+    if args.group_size != I2_GROUP_SIZE:
+        errors.append(f"group_size must be exactly {I2_GROUP_SIZE}, got {args.group_size}")
+    if args.residual_length != I2_RESIDUAL_LENGTH:
+        errors.append(f"residual_length must be exactly {I2_RESIDUAL_LENGTH}, got {args.residual_length}")
+    if args.seed != 42:
+        errors.append(f"seed must be exactly 42, got {args.seed}")
+    if os.path.abspath(args.output_root) != os.path.abspath(DEFAULT_OUTPUT_ROOT):
+        errors.append(f"output_root must be exactly {DEFAULT_OUTPUT_ROOT!r}, got {args.output_root!r}")
+    if os.path.abspath(args.policies_dir) != os.path.abspath(DEFAULT_POLICIES_DIR):
+        errors.append(f"policies_dir must be exactly {DEFAULT_POLICIES_DIR!r}, got {args.policies_dir!r}")
+    if errors:
+        raise I2ConfigError(
+            "Formal I2C argument lock violated -- refusing a subset/superset run masquerading "
+            "as I2C:\n" + "\n".join(errors)
+        )
+
+
+def i2c_dataset_identity_preflight(revision=I2_DATASET_REVISION, task_counts=I2_TASK_COUNTS):  # pragma: no cover - network path, exercised only by explicit --mode generation --run
+    """CPU/network preflight (Section 5) -- no model, no GPU: for each of
+    the 6 formal tasks, resolves THUDM/LongBench at the pinned revision and
+    verifies the test split has EXACTLY the preregistered row count (these
+    six tasks' sizes are already validated project-wide in
+    analysis.analyze_kv_ablation.EXPECTED_TASK_COUNTS, so an exact match is
+    the correct, stronger check here rather than merely '>='). Deferred
+    `datasets` import -- never invoked by --dry-run. Raises I2ConfigError
+    (never silently falls back to another revision) if the revision cannot
+    be resolved or any task's row count doesn't match. Returns the
+    per-task report list (task, requested_revision, available_row_count,
+    planned_row_count)."""
+    from datasets import load_dataset
+
+    report = []
+    for task, expected in task_counts.items():
+        try:
+            data = load_dataset("THUDM/LongBench", task, split="test", trust_remote_code=True, revision=revision)
+        except Exception as e:  # noqa: BLE001 -- must report, never silently fall back to another revision
+            raise I2ConfigError(
+                f"Could not resolve THUDM/LongBench task={task!r} at pinned revision={revision!r}: "
+                f"{type(e).__name__}: {e}. Refusing to fall back to another revision -- STOP."
+            ) from e
+        available = len(data)
+        report.append(
+            {"task": task, "requested_revision": revision, "available_row_count": available, "planned_row_count": expected}
+        )
+        if available != expected:
+            raise I2ConfigError(
+                f"THUDM/LongBench task={task!r} at revision={revision!r} has {available} test rows, "
+                f"expected exactly {expected} (the preregistered Stage-I2 count). Refusing to launch."
+            )
+    return report
+
+
+def find_passing_i2b_canary_for_head(collection_head, canary_root=None):
+    """Section 12: formal I2C must not rely forever on a stale canary.
+    Scans every I2B canary run directory for a machine-readable
+    canary_summary.json with overall_pass=True, exactly 6 conditions, every
+    condition_pass=True, AND collection_head equal to the CURRENT git HEAD
+    -- never "some previous commit passed". Returns the matching (most
+    recent, by run-label timestamp) summary dict; raises I2ConfigError if
+    none qualifies. CPU/file-I/O only."""
+    canary_root = canary_root if canary_root is not None else I2B_OUTPUT_ROOT
+    if not os.path.isdir(canary_root):
+        raise I2ConfigError(
+            f"No I2B canary runs found under {canary_root}; the I2B canary must PASS on the "
+            "current HEAD before formal I2C generation is authorized."
+        )
+    candidates = []
+    for run_label in sorted(os.listdir(canary_root)):
+        summary_path = os.path.join(canary_root, run_label, "canary_summary.json")
+        if not os.path.exists(summary_path):
+            continue
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+        candidates.append((run_label, summary))
+    if not candidates:
+        raise I2ConfigError(f"No readable I2B canary_summary.json found under {canary_root}.")
+
+    matching = [
+        (run_label, s)
+        for run_label, s in candidates
+        if s.get("collection_head") == collection_head
+        and s.get("overall_pass") is True
+        and len(s.get("conditions", [])) == 6
+        and all(c.get("condition_pass") is True for c in s.get("conditions", []))
+    ]
+    if not matching:
+        raise I2ConfigError(
+            f"No I2B canary run under {canary_root} has overall_pass=True with all 6/6 "
+            f"condition_pass=True AND collection_head == current HEAD ({collection_head}). A "
+            "stale-HEAD or partial-pass canary does not authorize formal I2C generation -- rerun "
+            "the I2B canary on this HEAD first."
+        )
+    matching.sort(key=lambda item: item[0])  # run_label is a sortable UTC timestamp string
+    return matching[-1][1]
+
+
+def build_initial_i2c_manifest(conditions, args, collection_head, preflight, dataset_report, task_counts=I2_TASK_COUNTS):
+    """Top-level formal manifest (Section 13). Written once (via
+    write_i2_manifest_atomic) before the first condition starts; updated
+    in place (record_i2c_condition_result) as conditions progress."""
+    now = datetime.now(timezone.utc).astimezone().isoformat()
+    return {
+        "experiment": "i2c_formal_layer_family_generation",
+        "collection_head": collection_head,
+        "dataset_revision": I2_DATASET_REVISION,
+        "dataset_identity_preflight": dataset_report,
+        "model_name_or_path": args.model_name_or_path,
+        "seed": args.seed,
+        "max_length": args.max_length,
+        "group_size": args.group_size,
+        "residual_length": args.residual_length,
+        "tasks": list(task_counts),
+        "expected_task_counts": dict(task_counts),
+        "total_planned_rows": total_example_count(task_counts, len(conditions)),
+        "num_conditions": len(conditions),
+        "boot_id_start": get_boot_id(),
+        "gpu_preflight": preflight,
+        "triton_ptxas_path": os.environ.get("TRITON_PTXAS_PATH"),
+        "start_time": now,
+        "last_update_time": now,
+        "conditions": [
+            {
+                "condition_id": c["condition_id"],
+                "layer_idx": c["layer_idx"],
+                "family": c["family"],
+                "k_bits": c["k_bits"],
+                "v_bits": c["v_bits"],
+                "policy_path": c["policy_path"],
+                "policy_hash": c["resolved_policy_hash"],
+                "output_dir": c["output_dir"],
+                "tasks": list(task_counts),
+                "expected_task_counts": dict(task_counts),
+                "status": "pending",
+                "task_counts_actual": None,
+                "exit_code": None,
+                "nonfinite_logits_seen": None,
+            }
+            for c in conditions
+        ],
+    }
+
+
+def record_i2c_condition_result(manifest, condition_id_, status, task_counts_actual=None, exit_code=None, nonfinite_logits_seen=None):
+    """Updates one condition's entry in-place (status in {pending, running,
+    complete, failed} -- Section 13) and bumps last_update_time. Fields
+    left as None by the caller are left unchanged (not overwritten with
+    None) -- only explicitly-provided values are recorded."""
+    for c in manifest["conditions"]:
+        if c["condition_id"] == condition_id_:
+            c["status"] = status
+            if task_counts_actual is not None:
+                c["task_counts_actual"] = task_counts_actual
+            if exit_code is not None:
+                c["exit_code"] = exit_code
+            if nonfinite_logits_seen is not None:
+                c["nonfinite_logits_seen"] = nonfinite_logits_seen
+            manifest["last_update_time"] = datetime.now(timezone.utc).astimezone().isoformat()
+            return manifest
+    raise I2ConfigError(f"condition_id {condition_id_} not found in formal manifest")
+
+
+def validate_condition_completion(condition_dir, task_counts=I2_TASK_COUNTS):
+    """Section 14: never mark a condition complete merely because
+    run_condition() returned. Verifies ALL SIX final task JSONLs exist,
+    are valid, have the exact expected row count, and have no leftover
+    .partial; plus the per-condition manifest.json has exit_code==0 and
+    nonfinite_logits_seen==False. Read-only; CPU/file-I/O only. Returns
+    (is_complete, report)."""
+    report = {"tasks": {}, "problems": []}
+    for task, expected in task_counts.items():
+        out_path = os.path.join(condition_dir, f"{task}.jsonl")
+        partial_path = out_path + ".partial"
+        info = inspect_jsonl(out_path)
+        task_ok = info.exists and info.invalid_rows == 0 and info.valid_rows == expected and not os.path.exists(partial_path)
+        report["tasks"][task] = {
+            "exists": info.exists,
+            "valid_rows": info.valid_rows,
+            "invalid_rows": info.invalid_rows,
+            "expected": expected,
+            "leftover_partial": os.path.exists(partial_path),
+            "ok": task_ok,
+        }
+        if not task_ok:
+            report["problems"].append(f"{task}: not complete ({report['tasks'][task]})")
+
+    manifest_path = os.path.join(condition_dir, "manifest.json")
+    condition_manifest = None
+    if os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            condition_manifest = json.load(f)
+
+    exit_code = condition_manifest.get("exit_code") if condition_manifest else None
+    nonfinite_logits_seen = condition_manifest.get("nonfinite_logits_seen") if condition_manifest else None
+    if condition_manifest is None:
+        report["problems"].append("condition manifest.json missing")
+    if exit_code != 0:
+        report["problems"].append(f"condition manifest exit_code={exit_code!r}, expected 0")
+    if nonfinite_logits_seen is not False:
+        report["problems"].append(f"condition manifest nonfinite_logits_seen={nonfinite_logits_seen!r}, expected False")
+
+    report["exit_code"] = exit_code
+    report["nonfinite_logits_seen"] = nonfinite_logits_seen
+    report["total_rows"] = sum(t["valid_rows"] for t in report["tasks"].values())
+    report["is_complete"] = not report["problems"]
+    return report["is_complete"], report
+
+
+def validate_formal_generation_complete(conditions, output_root, task_counts=I2_TASK_COUNTS):
+    """Section 15: aggregate integrity check across all 16 conditions --
+    16/16 conditions complete, 96/96 condition-task files complete,
+    23,200/23,200 rows -- required before I2C_FORMAL_GENERATION = PASS.
+    Read-only; CPU/file-I/O only."""
+    complete_conditions = 0
+    complete_task_files = 0
+    total_rows = 0
+    for c in conditions:
+        condition_dir = os.path.join(output_root, output_dir_name(c))
+        is_complete, report = validate_condition_completion(condition_dir, task_counts)
+        complete_task_files += sum(1 for t in report["tasks"].values() if t["ok"])
+        total_rows += report["total_rows"]
+        if is_complete:
+            complete_conditions += 1
+    expected_task_files = len(conditions) * len(task_counts)
+    expected_total_rows = total_example_count(task_counts, len(conditions))
+    all_complete = (
+        complete_conditions == len(conditions)
+        and complete_task_files == expected_task_files
+        and total_rows == expected_total_rows
+    )
+    return {
+        "conditions_complete": complete_conditions,
+        "conditions_total": len(conditions),
+        "task_files_complete": complete_task_files,
+        "task_files_total": expected_task_files,
+        "rows_complete": total_rows,
+        "rows_total": expected_total_rows,
+        "all_complete": all_complete,
+    }
+
+
+def run_i2c_formal_generation(args):  # pragma: no cover - GPU path, exercised only by explicit --mode generation --run with the exact formal universe
+    """Top-level I2C formal-generation orchestration (Sections 7/8). Runs
+    ALL validation/preflight (argument lock, git/process/GPU safety,
+    dataset-identity, current-HEAD I2B prerequisite) before acquiring the
+    top-level formal lock and starting any model load. Executes exactly
+    the 16 preregistered conditions in the locked layer-then-family order
+    (utils.i2_layer_family_conditions.all_i2_specs' canonical nesting, via
+    discover_and_validate_i2_policies) SEQUENTIALLY via the existing
+    run_condition(), one model at a time -- never parallelized. Stops
+    immediately (does not attempt later conditions) the moment any
+    condition fails to complete. Never invokes
+    analysis/analyze_i2_layer_family_sensitivity.py -- I2D is a separate,
+    later, explicitly-authorized review stage (Section 16)."""
+    import torch
+
+    validate_formal_i2c_arguments(args)
+    collection_head, preflight = i2b_preflight_checks()
+
+    if not torch.cuda.is_available():
+        raise I2ConfigError("CUDA is not available; formal I2C generation requires a real GPU.")
+
+    dataset_report = i2c_dataset_identity_preflight()
+    find_passing_i2b_canary_for_head(collection_head)  # raises I2ConfigError if no qualifying I2B run exists
+
+    write_i2_policies(args.policies_dir)
+    conditions = discover_and_validate_i2_policies(args.policies_dir, list(I2_LAYERS), list(I2_FAMILIES))
+    if len(conditions) != 16:
+        raise I2ConfigError(f"Expected exactly 16 formal I2C conditions, got {len(conditions)}.")
+    for c in conditions:
+        c["output_dir"] = os.path.join(args.output_root, output_dir_name(c))
+    output_dirs = [c["output_dir"] for c in conditions]
+    if len(set(output_dirs)) != len(output_dirs):
+        raise I2ConfigError("Output directory collision detected among I2C formal conditions.")
+    hashes = [c["resolved_policy_hash"] for c in conditions]
+    if len(set(hashes)) != len(hashes):
+        raise I2ConfigError("Policy hash collision detected among I2C formal conditions.")
+
+    os.makedirs(args.output_root, exist_ok=True)
+    lock_fh = acquire_i2_lock(os.path.join(args.output_root, I2C_FORMAL_LOCK_NAME))
+    manifest_path = os.path.join(args.output_root, I2C_FORMAL_MANIFEST_NAME)
+
+    try:
+        if os.path.exists(manifest_path):
+            manifest = read_i2_manifest(manifest_path)
+            if manifest.get("dataset_revision") != I2_DATASET_REVISION:
+                raise I2ConfigError(
+                    f"Existing formal manifest at {manifest_path} has dataset_revision="
+                    f"{manifest.get('dataset_revision')!r}, expected {I2_DATASET_REVISION!r}. Refusing "
+                    "to resume a formal run under a different dataset revision."
+                )
+        else:
+            manifest = build_initial_i2c_manifest(conditions, args, collection_head, preflight, dataset_report)
+            write_i2_manifest_atomic(manifest_path, manifest)
+
+        dataset2prompt = json.load(open(os.path.join(REPO_ROOT, "config/dataset2prompt.json"), "r"))
+        dataset2maxlen = json.load(open(os.path.join(REPO_ROOT, "config/dataset2maxlen.json"), "r"))
+
+        for c in conditions:
+            manifest = read_i2_manifest(manifest_path)
+            record_i2c_condition_result(manifest, c["condition_id"], status="running")
+            write_i2_manifest_atomic(manifest_path, manifest)
+
+            exit_code = run_condition(
+                c, args, dataset2prompt, dataset2maxlen, task_counts=I2_TASK_COUNTS, dataset_revision=I2_DATASET_REVISION
+            )
+
+            is_complete, completion_report = validate_condition_completion(c["output_dir"], I2_TASK_COUNTS)
+            task_counts_actual = {t: v["valid_rows"] for t, v in completion_report["tasks"].items()}
+
+            manifest = read_i2_manifest(manifest_path)
+            if exit_code == 0 and is_complete:
+                record_i2c_condition_result(
+                    manifest, c["condition_id"], status="complete", task_counts_actual=task_counts_actual,
+                    exit_code=exit_code, nonfinite_logits_seen=completion_report["nonfinite_logits_seen"],
+                )
+                write_i2_manifest_atomic(manifest_path, manifest)
+            else:
+                record_i2c_condition_result(
+                    manifest, c["condition_id"], status="failed", task_counts_actual=task_counts_actual,
+                    exit_code=exit_code, nonfinite_logits_seen=completion_report["nonfinite_logits_seen"],
+                )
+                write_i2_manifest_atomic(manifest_path, manifest)
+                raise I2ConfigError(
+                    f"Condition {c['condition_id']} did not complete successfully "
+                    f"(exit_code={exit_code}, problems={completion_report['problems']}); stopping the "
+                    "formal run -- later conditions are not attempted."
+                )
+
+        aggregate = validate_formal_generation_complete(conditions, args.output_root, I2_TASK_COUNTS)
+        manifest = read_i2_manifest(manifest_path)
+        manifest["aggregate"] = aggregate
+        manifest["last_update_time"] = datetime.now(timezone.utc).astimezone().isoformat()
+        write_i2_manifest_atomic(manifest_path, manifest)
+        print(json.dumps(aggregate, indent=2))
+        return 0 if aggregate["all_complete"] else 1
+    finally:
+        release_i2_lock(lock_fh)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1034,6 +1426,7 @@ def _print_generation_dry_run(conditions, task_counts, output_dirs, hashes, args
     conflicts = check_no_conflicting_process()
     print(f"\nConflicting-process check ({', '.join(CONFLICTING_PROCESS_PATTERNS)}): "
           f"{'NONE FOUND' if not conflicts else conflicts}")
+    print(f"\nFormal dataset revision (pinned, I2C only): {I2_DATASET_REVISION}")
     print("\nNo GPU process will be launched (--dry-run); torch/transformers/datasets were not imported.")
 
 
@@ -1079,11 +1472,12 @@ def main():
         _print_generation_dry_run(conditions, I2_TASK_COUNTS, output_dirs, hashes, args)
         return 0
 
-    raise I2ConfigError(
-        "I2C formal generation execution is not authorized by this task (Stage I2A is "
-        "infrastructure/preregistration only; I2B must pass first). Re-run with --dry-run, "
-        "or obtain explicit I2C authorization first."
-    )
+    # Stage I2C0: the real formal generation orchestration is now wired.
+    # validate_formal_i2c_arguments (called first, inside
+    # run_i2c_formal_generation) fails closed unless the exact
+    # preregistered universe was requested -- a subset/superset run can
+    # never masquerade as formal I2C.
+    return run_i2c_formal_generation(args)
 
 
 if __name__ == "__main__":
