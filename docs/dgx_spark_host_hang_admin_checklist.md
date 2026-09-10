@@ -47,16 +47,43 @@ to fill the evidence gap — ideally before the next long GPU run.
   43 valid rows were kept, the corrupted line removed, with a full backup
   of the pre-repair file.
 
+## Incident #3 — I2C formal layer-family generation, layer00_kivi (2026-09-09)
+
+- Launch: `2026-09-09T21:52:11+08:00` (lock file `pid=61613`)
+- Monitor log stopped: `2026-09-09T23:35:52+08:00` — last snapshot fully
+  normal (GPU 83°C / 90W / 96% util), immediately followed in the same file
+  by a long run of NUL (`\x00`) bytes with no further JSON lines — the same
+  allocated-but-never-flushed-block signature as Incident #2's corrupted
+  `.partial` tail, this time in the monitor log itself
+- Actual reboot: `2026-09-10T08:26` (per `last -x reboot`) — **~8h50m**
+  after the freeze; `uptime` at investigation time showed only ~2 minutes
+  since boot
+- `pid=61613` no longer exists post-reboot; the `flock`-based
+  `.i2c_formal.lock` was therefore automatically released by the kernel on
+  reboot (no manual lock removal was needed or performed)
+- Progress at freeze: condition 1 of 16 (`layer00_kivi`), `trec` (200/200)
+  and `lcc` (500/500) complete and valid, `passage_retrieval_en.jsonl.partial`
+  at 13/200 rows — all 13 rows verified individually parseable, 0 corrupted
+  lines (unlike Incident #2, no corrupted tail this time)
+- `journalctl -k` from this unprivileged account again returned no entries
+  for the boot in question (same access gap as Incidents #1/#2); `sudo` was
+  not invoked, per this project's standing constraint
+- Resumed via the existing `resolve_i2_task_resume_plan` logic (verified
+  first with `--dry-run`: `trec`/`lcc` correctly identified as `skip`,
+  `passage_retrieval_en` correctly identified as `resume (13/200)`); no
+  code, policy, or config changes were made before resuming
+
 ## Cross-incident read
 
-Both incidents share the same shape (app + monitor + journald all fall
+All three incidents share the same shape (app + monitor + journald all fall
 silent together, actual reboot follows much later, no application-level
-error). The two runs used *opposite* quantization directions (K16/V2 =
-Value-only quantized; K4/V16 = Key-only quantized), which weakens — but
-does not rule out — a single mixed-K/V code path as the sole explanation,
-and correspondingly raises suspicion of a host/driver-level issue shared
-across both runs. Without kernel-level evidence this remains a working
-hypothesis (`RECURRENT_HOST_LEVEL_HANG_SUSPECTED`), not a conclusion.
+error). The three runs span three different quantization/code configurations
+(K16/V2 value-only, K4/V16 key-only, and now K2/V16 key-only under the I2C
+harness), which further weakens a single mixed-K/V code path as the sole
+explanation and further raises suspicion of a host/driver-level issue that
+recurs specifically under long unattended GPU-saturating runs on this host.
+Without kernel-level evidence this remains a working hypothesis
+(`RECURRENT_HOST_LEVEL_HANG_SUSPECTED`), not a conclusion.
 
 ## Commands for an admin to run (require `sudo` or `adm`/`systemd-journal` group membership)
 
