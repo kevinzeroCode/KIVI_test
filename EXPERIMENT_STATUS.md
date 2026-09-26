@@ -461,6 +461,49 @@ length (`128`) where applicable, same seed (`42`), and greedy decoding.
   all measured, all close to their paper references, no anomalous or
   missing tasks) is considered **PASS**.
 
+## Phase 2 Summary: Layer-Wise KV Quantization (DGX Spark)
+
+Research question (set 2026-08-18, after the Phase-1 3x3 global K/V
+ablation): *can layer-wise KV distribution and attention geometry predict
+the most suitable quantization route (FP16 / KIVI / Rotation-KIVI / Polar)
+under a fixed memory budget?* Answering it needs three things in order:
+(1) layer sensitivity is heterogeneous, (2) measurable layer features
+predict it, (3) route choice per layer improves quality at a fixed budget.
+
+Phase-1 starting point (`analysis/results/kv_3x3/`): all 9 global K/V
+configs validated; only K4/V2 - FP16 had a 95% CI excluding zero
+(`-0.31`, `[-0.61, -0.02]`); all explicit KxV interaction CIs cross zero.
+
+All Phase-2 perturbations are one layer at a time (target layer quantized,
+all others K16/V16), on layers 0, 4, 9, 13, 18, 22, 27, 31; paired
+bootstrap 10,000 / seed 42 throughout. Every stage was pre-registered
+(`docs/stage_g3b_pre_registration.md`, `docs/stage_h0_pre_registration.md`,
+`docs/stage_i2_pre_registration.md`) and its gate fixed before data.
+
+| stage | question | result | outputs |
+|---|---|---|---|
+| A-C | per-layer K/V policy support (`--layer-policy`) | implemented, global behavior unchanged | `utils/layer_policy.py` |
+| D-E | is sensitivity heterogeneous across layers? (K2/V16 or K16/V2 at one layer; trec, lcc, passage_retrieval_en, 2wikimqa; 17,600 rows) | mostly Layer 0 only: SignedKey `+0.94` `[+0.52, +1.45]`, SignedValue `-1.03` `[-1.43, -0.66]`; other layers within about +-0.3 | `analysis/results/layer_sensitivity_pilot/` |
+| F0 | does the Layer-0 K/V asymmetry generalize to new tasks (multifieldqa_en, samsum)? | **`EARLY_LAYER_EXPANSION = NO_GO`**: new-task AxisDifference `+0.0002` `[-0.32, +0.31]`; fails the lcc-removed criterion | `analysis/results/layer_sensitivity_f0/` |
+| G3-G4 | do K/V reconstruction features (`relative_l2`) predict sensitivity? | **`FEATURE_PILOT_STAGE = NO_GO`**: median abs Spearman `0.17` (Key) / `0.17` (Value) vs `0.5` threshold | `analysis/results/layer_feature_pilot/` |
+| H | do decode-time attention-geometry features (logit / attention distortion) predict sensitivity? | **`STAGE_H_ATTENTION_FEATURE = NO_GO`**: median abs Spearman `0.13` (Key) / `0.14` (Value) | `analysis/results/layer_attention_feature_pilot/` |
+| I1-I2 | does Rotation-KIVI beat KIVI at some layers? | **`MIXED_POINT_ESTIMATE_DIRECTION`**: every layer CI crosses zero (see next section) | `analysis/results/i2_layer_family_sensitivity/` |
+| - | Polar route | not implemented | - |
+| - | per-layer allocation under a fixed memory budget | not run | - |
+
+Conclusion: on `longchat-7b-v1.5-32k`, the preconditions for layer-wise
+route selection do not hold. Single-layer sensitivity is small except for a
+Layer-0 effect that is driven largely by lcc and does not generalize;
+neither feature family predicts it; and swapping the quantizer family
+gives no layer-dependent gain. The headroom is also small to begin with:
+global KIVI-2 is only `0.48` below FP16 (38.02 vs 38.50) while cutting the
+KV cache by 81% (see "System Measurement").
+
+Not established (scope limits): multi-layer joint compression (all probes
+are single-layer, i.e. local sensitivity around FP16); an actual
+fixed-budget comparison such as "Layer 0 FP16 + all other layers K2/V2" vs
+global K2/V2; other models; seeds other than 42.
+
 ## Stage I2: Layer x Quantizer-Family Sensitivity (DGX Spark)
 
 Pre-registered in `docs/stage_i2_pre_registration.md`. For each of 8 layers
