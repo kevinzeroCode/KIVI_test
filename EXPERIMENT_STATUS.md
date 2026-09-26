@@ -53,8 +53,10 @@ local experimental artifacts and are intentionally not committed to GitHub.
   naming; mixed configs use `{model}_{len}_k{k}_v{v}_group{g}_residual{r}`,
   so `K2/V16` and `K16/V2` no longer collide with the `K2/V2`/`FP16`
   baseline directories.
-- Per-layer route maps are not implemented.
-- Rotation-KIVI and Polar are not implemented.
+- Per-layer K/V policies are implemented (`--layer-policy`, `utils/layer_policy.py`);
+  families `kivi` and `rotation_kivi` (QuaRot-inspired Key-only Hadamard
+  rotation) are executable.
+- Polar is not implemented.
 
 ## Completed Baseline (FP16, DGX Spark)
 
@@ -459,12 +461,72 @@ length (`128`) where applicable, same seed (`42`), and greedy decoding.
   all measured, all close to their paper references, no anomalous or
   missing tasks) is considered **PASS**.
 
+## Stage I2: Layer x Quantizer-Family Sensitivity (DGX Spark)
+
+Pre-registered in `docs/stage_i2_pre_registration.md`. For each of 8 layers
+(0, 4, 9, 13, 18, 22, 27, 31), only that layer is K2/V16 under `kivi` or
+`rotation_kivi`; all other layers are K16/V16. 16 conditions x 6 tasks
+(trec, lcc, passage_retrieval_en, 2wikimqa, multifieldqa_en, samsum) =
+23,200 rows, collected 2026-09-09 to 2026-09-25 at commit `66fcbda`
+(8 host hangs, each resumed without data loss). Analysis (I2D):
+`analysis/results/i2_layer_family_sensitivity/`; pairing audit PASS.
+
+Delta = Rotation - KIVI, equal-task mean, 95% paired bootstrap CI (10,000, seed 42):
+
+| layer | delta | 95% CI |
+|---|---|---|
+| 0 | `+0.001` | `[-0.117, +0.112]` |
+| 4 | `-0.098` | `[-0.326, +0.114]` |
+| 9 | `-0.218` | `[-0.504, +0.041]` |
+| 13 | `+0.121` | `[-0.361, +0.616]` |
+| 18 | `-0.093` | `[-0.728, +0.530]` |
+| 22 | `-0.022` | `[-0.299, +0.274]` |
+| 27 | `-0.087` | `[-0.215, +0.050]` |
+| 31 | `-0.134` | `[-0.323, +0.025]` |
+
+- Interpretation category: **`MIXED_POINT_ESTIMATE_DIRECTION`** (not
+  `STRONG_CROSSOVER`): every layer CI crosses zero.
+- 6 of 48 task-level CIs exclude zero (5 favor KIVI, 1 favors Rotation:
+  L18 2wikimqa `+1.19`); uncorrected for multiple comparisons (~2-3
+  expected by chance).
+- Rotation-KIVI has the same per-token KV-cache footprint as KIVI at
+  matched bits, so it offers no memory advantage either.
+
+## System Measurement (DGX Spark)
+
+`scripts/system_benchmark.py`, 2026-09-25. Production loader
+(`pred_long_bench.build_model_and_tokenizer`), batch size 1, fixed-seed
+random prompt, 128 greedy decode tokens, median of 3 repeats (spread < 2%),
+`lm_head` kept on GPU for every config. KV cache = bytes of every tensor
+held by the cache after decode (includes the FP16 residual). Raw rows:
+`analysis/results/system_benchmark/results.jsonl` (also 4K/16K contexts).
+
+Context 31,500 (model weights 12.6 GiB for every config):
+
+| config | KV cache | vs FP16 | peak alloc | prefill | decode |
+|---|---|---|---|---|---|
+| FP16 | `15.44 GiB` | - | `43.5 GiB` | `12.9 s` | `3.4 tok/s` |
+| K2/V16 | `9.17 GiB` | `-41%` | `31.0 GiB` | `13.3 s` | `4.6 tok/s` |
+| K16/V2 | `9.19 GiB` | `-40%` | `31.0 GiB` | `13.3 s` | `4.3 tok/s` |
+| K4/V4 | `4.85 GiB` | `-69%` | `22.3 GiB` | `13.8 s` | `5.2 tok/s` |
+| K2/V2 | `2.92 GiB` | `-81%` | `18.7 GiB` | `13.8 s` | `6.9 tok/s` |
+| Rotation K2/V16 | `9.17 GiB` | `-41%` | `31.0 GiB` | `13.4 s` | `4.6 tok/s` |
+
+- KV savings match the expected ~3 bits/element (2-bit codes + FP16
+  scale/min per 32-element group).
+- KIVI prefill is 3-7% slower (quantize/pack cost); decode is faster, and
+  the gap grows with context (K2/V2 vs FP16: +19% at 4K, 2.0x at 31.5K).
+  Part of the FP16 decode gap comes from HF `DynamicCache` concatenating
+  the full cache every step, so the speedup is not purely a bit-width effect.
+- Rotation-KIVI overhead is < 1% in prefill and negligible in decode.
+
 ## Current Gates
 
 - Gate A - Implementation Correctness: **PARTIAL**. The packed KIVI path,
   custom CUDA GEMV, and mixed K/V quantization (16-bit pass-through on
   either side) are all present and covered by unit/kernel-route/numerical
-  tests; per-layer routes are still unsupported.
+  tests; per-layer K/V policies and the `rotation_kivi` family are
+  implemented and canary-validated (Stages A-D, I1, I2B).
 - Gate B - Quality Reproduction: **PASS on DGX Spark for FP16, KIVI-2,
   KIVI-4, K2/V16, and K16/V2**. All five completed all 15 tasks; FP16/
   KIVI-2/KIVI-4 are within ~0.15-0.5 of their respective paper references
@@ -472,10 +534,11 @@ length (`128`) where applicable, same seed (`42`), and greedy decoding.
   of the Spark FP16 average (see "Five-Way KV Cache Ablation Comparison").
   The original RTX 4090 KIVI-2 result (`38.03`) is not superseded by the
   Spark KIVI-2 result (`38.02`) — both are recorded, and they closely agree.
-- Gate C - System Reproduction: **PARTIAL**. Packed low-bit storage is
-  implemented, and FP16/KIVI-2/KIVI-4 quality has now been measured on the
-  same host, but there is still no controlled comparison for peak memory,
-  bytes per token, or throughput across the three methods on this host.
+- Gate C - System Reproduction: **PASS (batch size 1)**. KV-cache bytes,
+  peak memory, prefill latency and decode throughput were measured for
+  FP16, K2/V16, K16/V2, K2/V2, K4/V4 and Rotation-KIVI K2/V16 on this host
+  (see "System Measurement (DGX Spark)"). Larger batch sizes are not yet
+  measured.
 
 ## DGX Spark Reproduction Notes
 

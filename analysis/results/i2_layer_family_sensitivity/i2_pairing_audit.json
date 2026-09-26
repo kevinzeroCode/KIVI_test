@@ -1,0 +1,25 @@
+{
+  "status": "PASS",
+  "layers_checked": [
+    0,
+    4,
+    9,
+    13,
+    18,
+    22,
+    27,
+    31
+  ],
+  "tasks_checked": [
+    "trec",
+    "lcc",
+    "passage_retrieval_en",
+    "2wikimqa",
+    "multifieldqa_en",
+    "samsum"
+  ],
+  "families_checked": [
+    "kivi",
+    "rotation_kivi"
+  ]
+}

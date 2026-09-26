@@ -1,0 +1,151 @@
+{
+  "timestamp": "2026-09-25T10:47:12.380676+08:00",
+  "seed": 42,
+  "bootstrap_iterations": 10000,
+  "scientific_question": "At a fixed K2/V16 KV-cache precision, does the relative downstream effect of Rotation-KIVI versus standard KIVI depend on decoder layer and workload?",
+  "c1_non_selection_note": "C1 (Stage I1) observed on lcc/dataset_index=122/layer=0/K2-V16 that Rotation-KIVI had higher Key decode distortion than standard KIVI. C1 distortion is NOT an I2 endpoint. C1 sample 122 does not determine I2 task selection. C1 direction does not determine the expected I2 downstream direction. No layer was removed because of C1.",
+  "layers": [
+    0,
+    4,
+    9,
+    13,
+    18,
+    22,
+    27,
+    31
+  ],
+  "tasks": [
+    "trec",
+    "lcc",
+    "passage_retrieval_en",
+    "2wikimqa",
+    "multifieldqa_en",
+    "samsum"
+  ],
+  "layer_point_estimates": {
+    "0": 0.0011121279192849443,
+    "4": -0.0982550091994175,
+    "9": -0.21808036980421086,
+    "13": 0.12112427102886336,
+    "18": -0.0934285996176752,
+    "22": -0.021647803631723878,
+    "27": -0.08714018822417972,
+    "31": -0.1339258433952845
+  },
+  "layer_bootstrap_ci": {
+    "0": {
+      "ci_low": -0.11690052413972941,
+      "ci_high": 0.11228907195835047
+    },
+    "4": {
+      "ci_low": -0.32593384297704403,
+      "ci_high": 0.11381606302989435
+    },
+    "9": {
+      "ci_low": -0.5044813041498005,
+      "ci_high": 0.0406730665404572
+    },
+    "13": {
+      "ci_low": -0.3608383537683881,
+      "ci_high": 0.6157593278430401
+    },
+    "18": {
+      "ci_low": -0.7281725601076918,
+      "ci_high": 0.5296167406790138
+    },
+    "22": {
+      "ci_low": -0.29905337322316083,
+      "ci_high": 0.2735447521775233
+    },
+    "27": {
+      "ci_low": -0.21500152532558278,
+      "ci_high": 0.049864190099961354
+    },
+    "31": {
+      "ci_low": -0.3233760496251864,
+      "ci_high": 0.024527396644945704
+    }
+  },
+  "task_conditioned_matrix": {
+    "0": {
+      "trec": 0.0,
+      "lcc": -0.018000000000000682,
+      "passage_retrieval_en": 0.0,
+      "2wikimqa": -0.01117216117216202,
+      "multifieldqa_en": 0.0,
+      "samsum": 0.03584492868787237
+    },
+    "4": {
+      "trec": 0.0,
+      "lcc": -0.35599999999999454,
+      "passage_retrieval_en": 0.0,
+      "2wikimqa": -0.42751547987616334,
+      "multifieldqa_en": 0.15093108306857062,
+      "samsum": 0.043054341611082236
+    },
+    "9": {
+      "trec": 0.0,
+      "lcc": -0.1039999999999992,
+      "passage_retrieval_en": -0.5,
+      "2wikimqa": -0.362666135034555,
+      "multifieldqa_en": -0.4702623070913319,
+      "samsum": 0.12844622330062094
+    },
+    "13": {
+      "trec": 0.0,
+      "lcc": 0.25,
+      "passage_retrieval_en": 1.0,
+      "2wikimqa": -0.22187257187257003,
+      "multifieldqa_en": -0.10366238788437698,
+      "samsum": -0.1977194140698728
+    },
+    "18": {
+      "trec": 0.5,
+      "lcc": 0.13000000000000256,
+      "passage_retrieval_en": -2.0,
+      "2wikimqa": 1.1934833742109276,
+      "multifieldqa_en": -0.35719374374055235,
+      "samsum": -0.02686122817642911
+    },
+    "22": {
+      "trec": 0.0,
+      "lcc": -0.29399999999999693,
+      "passage_retrieval_en": 0.5,
+      "2wikimqa": 0.21993464052287948,
+      "multifieldqa_en": -0.26635369578285406,
+      "samsum": -0.28946776653037176
+    },
+    "27": {
+      "trec": 0.0,
+      "lcc": -0.4160000000000039,
+      "passage_retrieval_en": 0.0,
+      "2wikimqa": 0.2463235294117645,
+      "multifieldqa_en": -0.10048968570961847,
+      "samsum": -0.2526749730472204
+    },
+    "31": {
+      "trec": 0.0,
+      "lcc": -0.09599999999999653,
+      "passage_retrieval_en": 0.0,
+      "2wikimqa": -0.14632352941176663,
+      "multifieldqa_en": -0.5204636203947359,
+      "samsum": -0.0407679105652079
+    }
+  },
+  "family_effect_range": {
+    "observed": 0.3392046408330742,
+    "bootstrap_mean": 0.5774356069813401,
+    "se": 0.22234641999027202,
+    "ci_low": 0.23324360096716482,
+    "ci_high": 1.092413506901201
+  },
+  "interpretation": {
+    "category": "MIXED_POINT_ESTIMATE_DIRECTION",
+    "strong_crossover": false,
+    "strong_crossover_positive_layers": [],
+    "strong_crossover_negative_layers": [],
+    "mixed_point_estimate_direction": true,
+    "all_layers_positive_point_estimate": false,
+    "all_layers_negative_point_estimate": false
+  }
+}
